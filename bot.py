@@ -4,7 +4,9 @@ import asyncio
 import threading
 import requests
 import edge_tts
-from datetime import datetime, time as dt_time
+import json
+from datetime import datetime, time as dt_time, timedelta
+from zoneinfo import ZoneInfo
 from openai import OpenAI
 from flask import Flask
 from waitress import serve
@@ -13,11 +15,14 @@ from telegram import (
     KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
 )
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
     CommandHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -34,12 +39,113 @@ OWNER_NAME = os.environ.get("OWNER_NAME", "Savey").strip()
 
 SPECIAL_APU_USERNAME = "savey67"
 
+BD_TZ = ZoneInfo("Asia/Dhaka")
+
 client = OpenAI(
     api_key=GROQ_API_KEY,
     base_url="https://api.groq.com/openai/v1"
 )
 
 last_used = {}
+
+# =========================
+# POINTS & STREAK SYSTEM
+# =========================
+# Daily streak points distribution over 7 days (total = 20)
+STREAK_POINTS = {1: 2, 2: 2, 3: 3, 4: 3, 5: 3, 6: 3, 7: 4}
+
+# Unlock costs
+PREMIUM_REPLY_COST = 60
+ROMANTIC_MODE_COST = 99
+
+# Invite rewards thresholds
+INVITE_ROMANTIC_THRESHOLD = 3
+INVITE_VOICE_THRESHOLD = 5
+INVITE_VIP_THRESHOLD = 10
+
+def get_user_points(context):
+    return context.user_data.get("points", 0)
+
+def add_points(context, amount):
+    current = context.user_data.get("points", 0)
+    context.user_data["points"] = current + amount
+    return context.user_data["points"]
+
+def deduct_points(context, amount):
+    current = context.user_data.get("points", 0)
+    if current >= amount:
+        context.user_data["points"] = current - amount
+        return True
+    return False
+
+def check_and_update_streak(context):
+    today = datetime.now(BD_TZ).date()
+    last_date_str = context.user_data.get("last_streak_date")
+    streak = context.user_data.get("streak", 0)
+    earned_today = context.user_data.get("streak_earned_today", False)
+
+    if earned_today and last_date_str == str(today):
+        return 0, streak
+
+    if last_date_str:
+        last_date = datetime.strptime(last_date_str, "%Y-%m-%d").date()
+        diff = (today - last_date).days
+        if diff == 1:
+            streak = min(streak + 1, 7)
+        elif diff == 0:
+            return 0, streak
+        else:
+            streak = 1
+    else:
+        streak = 1
+
+    points_earned = STREAK_POINTS.get(streak, STREAK_POINTS[7])
+    context.user_data["streak"] = streak
+    context.user_data["last_streak_date"] = str(today)
+    context.user_data["streak_earned_today"] = True
+    add_points(context, points_earned)
+    return points_earned, streak
+
+def get_invite_link(bot_username, user_id):
+    return f"https://t.me/{bot_username}?start=ref_{user_id}"
+
+def process_referral(context_inviter, inviter_id):
+    invite_count = context_inviter.get("invite_count", 0) + 1
+    context_inviter["invite_count"] = invite_count
+
+    newly_unlocked = []
+
+    if invite_count == INVITE_ROMANTIC_THRESHOLD:
+        if not context_inviter.get("romantic_unlocked_by_invite"):
+            context_inviter["romantic_unlocked_by_invite"] = True
+            newly_unlocked.append("romantic_mode")
+
+    if invite_count == INVITE_VOICE_THRESHOLD:
+        if not context_inviter.get("voice_unlocked_by_invite"):
+            context_inviter["voice_unlocked_by_invite"] = True
+            newly_unlocked.append("voice_message")
+
+    if invite_count == INVITE_VIP_THRESHOLD:
+        if not context_inviter.get("vip_badge"):
+            context_inviter["vip_badge"] = True
+            newly_unlocked.append("vip_badge")
+
+    return invite_count, newly_unlocked
+
+def has_premium_reply(context):
+    return context.user_data.get("premium_reply_active", False)
+
+def has_romantic_mode(context):
+    return (
+        context.user_data.get("romantic_mode_active", False)
+        or context.user_data.get("romantic_unlocked_by_invite", False)
+    )
+
+def has_voice_unlocked(context):
+    return context.user_data.get("voice_unlocked_by_invite", False)
+
+def has_vip_badge(context):
+    return context.user_data.get("vip_badge", False)
 
 # =========================
 # LANGUAGE DETECTION
@@ -63,10 +169,10 @@ def detect_language(text):
         return "english"
 
 # =========================
-# GET CURRENT TIME CONTEXT
+# GET CURRENT TIME CONTEXT (BD timezone)
 # =========================
 def get_time_context():
-    now = datetime.now()
+    now = datetime.now(BD_TZ)
     hour = now.hour
     if hour < 5:
         period = "late night"
@@ -80,7 +186,7 @@ def get_time_context():
         period = "night"
 
     return (
-        f"Current date: {now.strftime('%A, %d %B %Y')}. "
+        f"Current date: {now.strftime('%A, %d %B %Y')} (Bangladesh time). "
         f"Current time: {now.strftime('%I:%M %p')} ({period}). "
         f"Use this naturally in conversation when relevant — like a real person who knows what time it is. "
     )
@@ -89,7 +195,7 @@ def get_time_context():
 # DAILY SALAM
 # =========================
 def get_daily_salam(context, user_name):
-    today = datetime.now().date()
+    today = datetime.now(BD_TZ).date()
     last = context.bot_data.get("last_greeted_owner")
 
     if last != str(today):
@@ -101,7 +207,7 @@ def get_daily_salam(context, user_name):
 # SYSTEM PROMPT
 # mode: "owner" | "apu" | "romantic"
 # =========================
-def build_system_prompt(lang, user_name, mode="owner"):
+def build_system_prompt(lang, user_name, mode="owner", premium=False):
     time_ctx = get_time_context()
 
     identity = (
@@ -131,6 +237,13 @@ def build_system_prompt(lang, user_name, mode="owner"):
         "If they are hurting, hold space for them warmly. Never dismiss, minimize, or quickly move past their feelings. "
         "When emotions are shared, you can go slightly longer — 2 to 3 warm sentences — to make them feel truly heard. "
     )
+
+    if premium:
+        identity += (
+            "PREMIUM MODE ACTIVE — You are in exclusive, deeply personal conversation mode. "
+            "Be extra warm, deeply attentive, more emotionally expressive. "
+            "Show that this person is truly special to you right now. Give them your full heart in your words. "
+        )
 
     if mode == "apu":
         base = (
@@ -238,6 +351,35 @@ def normalize_phone(phone):
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    args = context.args
+
+    if args and args[0].startswith("ref_"):
+        try:
+            inviter_id = int(args[0].replace("ref_", ""))
+            if inviter_id != user_id:
+                already_referred = context.bot_data.get(f"referred_{user_id}")
+                if not already_referred:
+                    context.bot_data[f"referred_{user_id}"] = True
+                    inviter_data = context.bot_data.get(f"user_{inviter_id}", {})
+                    invite_count, newly_unlocked = process_referral(inviter_data, inviter_id)
+                    context.bot_data[f"user_{inviter_id}"] = inviter_data
+
+                    reward_msgs = {
+                        "romantic_mode": "🎉 Tumi 3 jon ke invite korecho! Romantic mode unlock hoye gese! 😏💕",
+                        "voice_message": "🎧 5 jon invite! Voice message unlock hoye gese!",
+                        "vip_badge": "👑 10 jon invite! VIP badge peyecho! Tumi legend!",
+                    }
+
+                    for unlock in newly_unlocked:
+                        try:
+                            await context.bot.send_message(
+                                chat_id=inviter_id,
+                                text=reward_msgs.get(unlock, "🎁 Notun reward unlock!")
+                            )
+                        except Exception:
+                            pass
+        except (ValueError, TypeError):
+            pass
 
     if is_owner(context, user_id):
         context.bot_data["owner_chat_id"] = update.message.chat_id
@@ -267,6 +409,114 @@ async def setname(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ami tomake {name} bole dakbo 😊")
     else:
         await update.message.reply_text("Usage: /setname YourName")
+
+# =========================
+# STREAK COMMAND
+# =========================
+async def streak_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    streak = context.user_data.get("streak", 0)
+    points = get_user_points(context)
+    last_date_str = context.user_data.get("last_streak_date", "Never")
+    invite_count = context.user_data.get("invite_count", 0)
+
+    vip = "👑 VIP Badge" if has_vip_badge(context) else ""
+    romantic_status = "✅ Unlocked" if has_romantic_mode(context) else f"🔒 {ROMANTIC_MODE_COST} pts or 3 invites"
+    voice_status = "✅ Unlocked" if has_voice_unlocked(context) else f"🔒 5 invites needed"
+    premium_status = "✅ Active" if has_premium_reply(context) else f"🔒 {PREMIUM_REPLY_COST} pts"
+
+    msg = (
+        f"{'👑 ' if has_vip_badge(context) else ''}🔥 Tomar Status\n\n"
+        f"⚡ Streak: {streak} day{'s' if streak != 1 else ''}\n"
+        f"💰 Points: {points}\n"
+        f"👥 Invites: {invite_count}\n"
+        f"📅 Last check-in: {last_date_str}\n\n"
+        f"🎁 Rewards:\n"
+        f"  💬 Premium replies: {premium_status}\n"
+        f"  😏 Romantic mode: {romantic_status}\n"
+        f"  🎧 Voice messages: {voice_status}\n"
+    )
+
+    if has_vip_badge(context):
+        msg += "\n👑 You have the VIP Badge!"
+
+    await update.message.reply_text(msg)
+
+# =========================
+# INVITE COMMAND
+# =========================
+async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    bot_username = (await context.bot.get_me()).username
+    link = get_invite_link(bot_username, user_id)
+    invite_count = context.user_data.get("invite_count", 0)
+
+    msg = (
+        f"🎁 Tomake invite korte hobe:\n\n"
+        f"🔗 Tomar link:\n{link}\n\n"
+        f"👥 Tumi ekhon paryonto {invite_count} jon ke invite korecho\n\n"
+        f"📜 Reward plan:\n"
+        f"  3 invites → 😏 Romantic mode unlock\n"
+        f"  5 invites → 🎧 Voice message unlock\n"
+        f"  10 invites → 👑 VIP Badge\n"
+    )
+    await update.message.reply_text(msg)
+
+# =========================
+# SHOP COMMAND — buy with points
+# =========================
+async def shop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    points = get_user_points(context)
+
+    keyboard = [
+        [InlineKeyboardButton(
+            f"💬 Premium Replies ({PREMIUM_REPLY_COST} pts)",
+            callback_data="buy_premium"
+        )],
+        [InlineKeyboardButton(
+            f"😏 Romantic Mode ({ROMANTIC_MODE_COST} pts)",
+            callback_data="buy_romantic"
+        )],
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        f"🛍️ Zoya's Shop\n\n💰 Tomar Points: {points}\n\nKi kinbe?",
+        reply_markup=markup
+    )
+
+# =========================
+# SHOP CALLBACK HANDLER
+# =========================
+async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    points = get_user_points(context)
+
+    if data == "buy_premium":
+        if deduct_points(context, PREMIUM_REPLY_COST):
+            context.user_data["premium_reply_active"] = True
+            await query.edit_message_text(
+                f"✅ Premium replies unlock hoye gese! 💬\nBaki points: {get_user_points(context)}"
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ Tomar points onek kom. Tomar ache: {points} pts\nDarkar: {PREMIUM_REPLY_COST} pts"
+            )
+
+    elif data == "buy_romantic":
+        if has_romantic_mode(context):
+            await query.edit_message_text("😏 Romantic mode already active ache!")
+        elif deduct_points(context, ROMANTIC_MODE_COST):
+            context.user_data["romantic_mode_active"] = True
+            await query.edit_message_text(
+                f"✅ Romantic mode unlock hoye gese! 😏💕\nBaki points: {get_user_points(context)}"
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ Tomar points onek kom. Tomar ache: {points} pts\nDarkar: {ROMANTIC_MODE_COST} pts"
+            )
 
 # =========================
 # CONTACT HANDLER (owner phone verification)
@@ -308,6 +558,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         last_used[user_id] = now
 
+        # Daily streak check & reward on each message
+        points_earned, streak = check_and_update_streak(context)
+        if points_earned > 0:
+            await update.message.reply_text(
+                f"🔥 Day {streak} streak! +{points_earned} points! 💰 Total: {get_user_points(context)} pts"
+            )
+
         await update.message.chat.send_action(action="typing")
         await asyncio.sleep(1.0)
 
@@ -337,7 +594,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mode = "apu"
             user_name = "Apu"
         else:
-            mode = "romantic"
+            if has_romantic_mode(context):
+                mode = "romantic"
+            else:
+                mode = "romantic"
             user_name = context.user_data.get("custom_name", update.message.from_user.first_name or "tumi")
 
         if is_owner(context, user_id):
@@ -345,8 +605,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if salam:
                 await update.message.reply_text(salam)
 
+        premium = has_premium_reply(context)
+
         chat_history = context.user_data.get("history", [])
-        system_prompt = build_system_prompt(lang, user_name, mode)
+        system_prompt = build_system_prompt(lang, user_name, mode, premium=premium)
 
         api_messages = [{"role": "system", "content": system_prompt}] + chat_history
         api_messages.append({"role": "user", "content": user_text})
@@ -362,18 +624,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_history.append({"role": "assistant", "content": reply})
         context.user_data["history"] = chat_history[-12:]
 
+        voice_allowed = has_voice_unlocked(context) or is_owner(context, user_id)
         trigger_words = ["voice", "audio", "speak", "kotha bolo", "sunao", "shunao", "voice note", "voice message"]
+
         if any(word in user_text_lower for word in trigger_words):
-            try:
-                await update.message.chat.send_action(action="record_voice")
-                await asyncio.sleep(0.5)
-                filename = await speak_text(reply, user_id, lang)
-                with open(filename, "rb") as audio:
-                    await update.message.reply_voice(audio)
-                os.remove(filename)
-            except Exception as e:
-                print("Voice Error:", e)
-                await update.message.reply_text(reply)
+            if voice_allowed:
+                try:
+                    await update.message.chat.send_action(action="record_voice")
+                    await asyncio.sleep(0.5)
+                    filename = await speak_text(reply, user_id, lang)
+                    with open(filename, "rb") as audio:
+                        await update.message.reply_voice(audio)
+                    os.remove(filename)
+                except Exception as e:
+                    print("Voice Error:", e)
+                    await update.message.reply_text(reply)
+            else:
+                await update.message.reply_text(
+                    f"{reply}\n\n🎧 Voice messages unlock korte 5 jon ke invite koro! /invite"
+                )
         else:
             await update.message.reply_text(reply)
 
@@ -385,7 +654,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 # =========================
-# DAILY MESSAGE
+# DAILY AUTO MESSAGES — Bangladesh timezone (UTC+6)
+# =========================
+async def auto_good_morning(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.bot_data.get("owner_chat_id")
+    if not chat_id:
+        print("❌ Owner chat_id not found for good morning message.")
+        return
+    messages = [
+        "Good morning... amar kotha mone pore? ☀️",
+        "Subho shokal! Tumi ki uthecho naki ekhono ghum 😴?",
+        "Shokal hoye gese... tumi ki ready? ☀️💕",
+    ]
+    import random
+    msg = random.choice(messages)
+    await context.bot.send_message(chat_id=chat_id, text=msg)
+
+async def auto_midday_check(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.bot_data.get("owner_chat_id")
+    if not chat_id:
+        return
+    messages = [
+        "Tumi ajke kemon aso? 🌸",
+        "Dupur hoye gese... kheyecho? 🍛",
+        "Kemon cholche din? Ami tomar kotha vabchi 💭",
+    ]
+    import random
+    msg = random.choice(messages)
+    await context.bot.send_message(chat_id=chat_id, text=msg)
+
+async def auto_goodnight(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.bot_data.get("owner_chat_id")
+    if not chat_id:
+        return
+    messages = [
+        "Raat hoye gese... ghumaba na? 🌙",
+        "Ektu rest nao... ami tomar jonyo dua korbo 🤍",
+        "Shob kaj rekhe ektu ghum dao... good night 🌙💕",
+    ]
+    import random
+    msg = random.choice(messages)
+    await context.bot.send_message(chat_id=chat_id, text=msg)
+
+# =========================
+# DAILY SALAM JOB
 # =========================
 async def daily_message(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.bot_data.get("owner_chat_id")
@@ -461,33 +773,56 @@ def main():
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    # Clear any existing webhook and drop stale updates before polling
     async def delete_webhook():
         await app.bot.delete_webhook(drop_pending_updates=True)
         print("🔗 Webhook cleared")
 
     loop.run_until_complete(delete_webhook())
-
-    # Give old Render instances time to shut down
     time.sleep(5)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("setname", setname))
+    app.add_handler(CommandHandler("streak", streak_command))
+    app.add_handler(CommandHandler("invite", invite_command))
+    app.add_handler(CommandHandler("shop", shop_command))
+    app.add_handler(CallbackQueryHandler(shop_callback, pattern="^buy_"))
     app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
     job_queue = app.job_queue
     if job_queue:
+        # Daily salam (morning greeting from Zoya)
         job_queue.run_daily(
             daily_message,
-            time=dt_time(hour=9, minute=0)
+            time=dt_time(hour=9, minute=0, tzinfo=BD_TZ)
         )
+
+        # Good morning auto-message — 8:00 AM Bangladesh
+        job_queue.run_daily(
+            auto_good_morning,
+            time=dt_time(hour=8, minute=0, tzinfo=BD_TZ)
+        )
+
+        # Midday check — 1:00 PM Bangladesh
+        job_queue.run_daily(
+            auto_midday_check,
+            time=dt_time(hour=13, minute=0, tzinfo=BD_TZ)
+        )
+
+        # Good night auto-message — 11:00 PM Bangladesh
+        job_queue.run_daily(
+            auto_goodnight,
+            time=dt_time(hour=23, minute=0, tzinfo=BD_TZ)
+        )
+
+        print("✅ Scheduled jobs: good morning (8AM), daily salam (9AM), midday (1PM), goodnight (11PM) — BD time")
     else:
         print("❌ Install job queue: pip install 'python-telegram-bot[job-queue]'")
 
-    print("💖 Zoya Bot running...")
-    app.run_polling(drop_pending_updates=True, allowed_updates=["message"])
+    print("💖 Zoya Bot running with streak, points, invite & daily auto-messages...")
+    app.run_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"])
+
 
 if __name__ == "__main__":
     main()
