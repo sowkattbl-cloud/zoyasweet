@@ -466,7 +466,6 @@ def get_ai_reply(messages):
         except Exception as e:
             err = str(e).lower()
             print(f"API Error (attempt {attempt+1}, key [{key_idx+1}]): {e}")
-
             if "rate" in err or "429" in err or "quota" in err or "limit" in err:
                 retry_after = 60
                 try:
@@ -490,7 +489,6 @@ def get_ai_reply(messages):
             else:
                 time.sleep(2)
                 continue
-
     return None
 
 # =========================
