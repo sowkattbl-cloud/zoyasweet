@@ -4,6 +4,9 @@ import asyncio
 import threading
 import requests
 import random
+import sys
+import fcntl
+import signal
 import edge_tts
 from datetime import datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo
@@ -28,10 +31,49 @@ from telegram.ext import (
 )
 
 # =========================
+# SINGLE-INSTANCE LOCK
+# =========================
+LOCK_FILE = "/tmp/zoya_bot.lock"
+_lock_fd = None
+
+def acquire_instance_lock():
+    global _lock_fd
+    _lock_fd = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _lock_fd.write(str(os.getpid()))
+        _lock_fd.flush()
+        print(f"✅ Instance lock acquired (PID {os.getpid()})")
+        return True
+    except IOError:
+        print("⚠️  Another instance is already running. Exiting to avoid conflict.")
+        _lock_fd.close()
+        _lock_fd = None
+        return False
+
+def release_instance_lock():
+    global _lock_fd
+    if _lock_fd:
+        fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+        _lock_fd.close()
+        _lock_fd = None
+        try:
+            os.remove(LOCK_FILE)
+        except OSError:
+            pass
+
+def handle_signal(sig, frame):
+    print(f"\n🛑 Signal {sig} received — shutting down gracefully...")
+    release_instance_lock()
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, handle_signal)
+signal.signal(signal.SIGINT, handle_signal)
+
+# =========================
 # CONFIG
 # =========================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip().strip('"').strip("'")
-GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "").strip().strip('"').strip("'")
 RENDER_URL     = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
 OWNER_PHONE    = os.environ.get("OWNER_PHONE", "").strip()
 OWNER_NAME     = os.environ.get("OWNER_NAME", "Savey").strip()
@@ -39,7 +81,70 @@ OWNER_NAME     = os.environ.get("OWNER_NAME", "Savey").strip()
 SPECIAL_APU_USERNAME = "savey67"
 BD_TZ = ZoneInfo("Asia/Dhaka")
 
-client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+# =========================
+# MULTI-API KEY ROTATION
+# =========================
+def _load_api_keys():
+    keys = []
+    primary = os.environ.get("GROQ_API_KEY", "").strip().strip('"').strip("'")
+    if primary:
+        keys.append(primary)
+    i = 1
+    while True:
+        k = os.environ.get(f"GROQ_API_KEY_{i}", "").strip().strip('"').strip("'")
+        if not k:
+            break
+        keys.append(k)
+        i += 1
+    return keys
+
+class APIKeyManager:
+    def __init__(self, keys):
+        if not keys:
+            raise ValueError("No Groq API keys configured!")
+        self._keys = keys
+        self._index = 0
+        self._lock = threading.Lock()
+        self._cooldowns = {}
+        print(f"✅ Loaded {len(self._keys)} API key(s) for rotation")
+
+    def get_client(self):
+        with self._lock:
+            now = time.time()
+            for _ in range(len(self._keys)):
+                key = self._keys[self._index]
+                cooldown_until = self._cooldowns.get(self._index, 0)
+                if now >= cooldown_until:
+                    return OpenAI(
+                        api_key=key,
+                        base_url="https://api.groq.com/openai/v1"
+                    ), self._index
+                self._index = (self._index + 1) % len(self._keys)
+            earliest = min(self._cooldowns.values(), default=0)
+            wait = max(0, earliest - now)
+            print(f"⚠️  All keys on cooldown. Waiting {wait:.1f}s...")
+            time.sleep(wait + 0.5)
+            self._cooldowns.clear()
+            return OpenAI(
+                api_key=self._keys[self._index],
+                base_url="https://api.groq.com/openai/v1"
+            ), self._index
+
+    def mark_rate_limited(self, key_index, retry_after=60):
+        with self._lock:
+            self._cooldowns[key_index] = time.time() + retry_after
+            self._index = (key_index + 1) % len(self._keys)
+            print(f"🔄 Key [{key_index+1}] rate-limited — switching to key [{self._index+1}]. "
+                  f"Cooldown: {retry_after}s")
+
+    def mark_error(self, key_index):
+        with self._lock:
+            self._cooldowns[key_index] = time.time() + 30
+            self._index = (key_index + 1) % len(self._keys)
+            print(f"🔄 Key [{key_index+1}] errored — switching to key [{self._index+1}]")
+
+api_keys = _load_api_keys()
+key_manager = APIKeyManager(api_keys)
 
 last_used = {}
 
@@ -340,11 +445,13 @@ def build_system_prompt(lang: str, user_name: str, mode: str = "friendly", premi
     return base + lang_rule
 
 # =========================
-# AI REPLY
+# AI REPLY — with key rotation
 # =========================
 def get_ai_reply(messages):
-    for attempt in range(3):
+    max_attempts = len(api_keys) * 3
+    for attempt in range(max_attempts):
         try:
+            client, key_idx = key_manager.get_client()
             response = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=messages,
@@ -358,13 +465,32 @@ def get_ai_reply(messages):
             return response.choices[0].message.content.strip()
         except Exception as e:
             err = str(e).lower()
-            print(f"Groq Error (attempt {attempt+1}): {e}")
-            if "rate" in err or "429" in err:
-                time.sleep(5 * (attempt + 1)); continue
-            elif "timeout" in err or "connection" in err:
-                time.sleep(2); continue
+            print(f"API Error (attempt {attempt+1}, key [{key_idx+1}]): {e}")
+
+            if "rate" in err or "429" in err or "quota" in err or "limit" in err:
+                retry_after = 60
+                try:
+                    import re
+                    m = re.search(r"retry.after.*?(\d+)", err)
+                    if m:
+                        retry_after = int(m.group(1))
+                except Exception:
+                    pass
+                key_manager.mark_rate_limited(key_idx, retry_after=retry_after)
+                time.sleep(2)
+                continue
+            elif "timeout" in err or "connection" in err or "network" in err:
+                key_manager.mark_error(key_idx)
+                time.sleep(2)
+                continue
+            elif "auth" in err or "401" in err or "invalid" in err:
+                key_manager.mark_error(key_idx)
+                time.sleep(1)
+                continue
             else:
-                break
+                time.sleep(2)
+                continue
+
     return None
 
 # =========================
@@ -703,7 +829,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         last_used[user_id] = now
 
-        # ── Language button taps ──
         if user_text_stripped in LANG_BUTTON_MAP:
             chosen = LANG_BUTTON_MAP[user_text_stripped]
             context.user_data["lang"]        = chosen
@@ -717,7 +842,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                             reply_markup=build_mode_keyboard(context))
             return
 
-        # ── Mode button taps ──
         for btn_text, mode_key in MODE_BUTTONS.items():
             if user_text_stripped == btn_text or user_text_lower == btn_text.lower():
                 success, err_msg = try_set_mode(context, mode_key)
@@ -736,7 +860,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-        # ── Locked buttons ──
         for btn_text, mode_key in [
             ("💘 Love % 🔒","love"),   ("💘 Love % ✅","love"),
             ("✨ Special 🔒","special"),("✨ Special ✅","special"),
@@ -755,7 +878,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-        # ── My Status ──
         if user_text_stripped == "📊 My Status":
             streak   = context.user_data.get("streak", 0)
             points   = get_user_points(context)
@@ -773,7 +895,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # ── Invite button ──
         if user_text_stripped == "🎁 Invite":
             bot_username = (await context.bot.get_me()).username
             link = get_invite_link(bot_username, user_id)
@@ -785,7 +906,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # ── Voice chat gate ──
         if any(kw in user_text_lower for kw in VOICE_CHAT_TRIGGERS) and not is_owner(context, user_id):
             if not has_premium_reply(context) and not has_voice_unlocked(context):
                 need = INVITE_VOICE_THRESHOLD - context.user_data.get("invite_count", 0)
@@ -797,7 +917,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-        # ── Daily streak ──
         points_earned, streak = check_and_update_streak(context)
         if points_earned > 0:
             await update.message.reply_text(
@@ -807,7 +926,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.chat.send_action(action="typing")
         await asyncio.sleep(1.0)
 
-        # ── Language detection ──
         if not context.user_data.get("lang_locked", False):
             if "bangla te bolo" in user_text_lower or "bangla bolo" in user_text_lower:
                 context.user_data["lang"] = "bangla"
@@ -820,7 +938,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["lang"] = detect_language(user_text)
         lang = context.user_data.get("lang", "banglish")
 
-        # ── Identity & mode ──
         username = (update.message.from_user.username or "").lower()
         is_apu   = (username == SPECIAL_APU_USERNAME.lstrip("@").lower())
 
@@ -842,6 +959,164 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         premium      = has_premium_reply(context)
         chat_history = context.user_data.get("history", [])
+        system_prompt = build_system_prompt(lang, user_name, mode, premium=premium)
+
+        api_messages = [{"role": "system", "content": system_prompt}] + chat_history
+        api_messages.append({"role": "user", "content": user_text})
+
+        reply = get_ai_reply(api_messages)
+
+        if re **...**
+
+# =========================
+# MESSAGE HANDLER
+# =========================
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_text          = update.message.text
+        user_id            = update.message.from_user.id
+        user_text_stripped = user_text.strip()
+        user_text_lower    = user_text_stripped.lower()
+
+        if is_owner(context, user_id):
+            context.bot_data["owner_chat_id"] = update.message.chat_id
+
+        now = time.time()
+        if user_id in last_used and now - last_used[user_id] < 2:
+            await update.message.chat.send_action(action="typing")
+            return
+        last_used[user_id] = now
+
+        if user_text_stripped in LANG_BUTTON_MAP:
+            chosen = LANG_BUTTON_MAP[user_text_stripped]
+            context.user_data["lang"]        = chosen
+            context.user_data["lang_locked"] = True
+            confirm = {
+                "bangla":   "🇧🇩 ঠিক আছে! এখন থেকে বাংলায় কথা বলব 😊",
+                "banglish": "🔤 Ok! Ekhon theke banglish e bolbo 😊",
+                "english":  "🇬🇧 Got it! I'll speak English from now on 😊",
+            }
+            await update.message.reply_text(confirm[chosen],
+                                            reply_markup=build_mode_keyboard(context))
+            return
+
+        for btn_text, mode_key in MODE_BUTTONS.items():
+            if user_text_stripped == btn_text or user_text_lower == btn_text.lower():
+                success, err_msg = try_set_mode(context, mode_key)
+                labels = {
+                    "gf":       "💕 Girlfriend mode on!",
+                    "roast":    "🔥 Roast mode on!",
+                    "sad":      "🫂 Ami sunchi tomar katha...",
+                    "friendly": "😊 Friendly mode!",
+                    "love":     "💘 Love % mode on! Kar sathe check korbo?",
+                    "special":  "✨ Secret mode... kache eso 🤫",
+                    "romantic": "😏 Romantic mode on... 💕",
+                }
+                await update.message.reply_text(
+                    labels.get(mode_key, "Mode on!") if success else err_msg,
+                    reply_markup=build_mode_keyboard(context)
+                )
+                return
+
+        for btn_text, mode_key in [
+            ("💘 Love % 🔒","love"),   ("💘 Love % ✅","love"),
+            ("✨ Special 🔒","special"),("✨ Special ✅","special"),
+            ("😏 Romantic 🔒","romantic"),("😏 Romantic ✅","romantic"),
+        ]:
+            if user_text_stripped == btn_text:
+                success, err_msg = try_set_mode(context, mode_key)
+                labels = {
+                    "love":     "💘 Love % mode on!",
+                    "special":  "✨ Secret mode... 🤫",
+                    "romantic": "😏 Romantic mode on... 💕",
+                }
+                await update.message.reply_text(
+                    labels.get(mode_key, "Mode on!") if success else err_msg,
+                    reply_markup=build_mode_keyboard(context)
+                )
+                return
+
+        if user_text_stripped == "📊 My Status":
+            streak   = context.user_data.get("streak", 0)
+            points   = get_user_points(context)
+            inv      = context.user_data.get("invite_count", 0)
+            mode_now = MODE_LABELS.get(get_user_mode(context), get_user_mode(context))
+            lang_now = context.user_data.get("lang", "auto")
+            await update.message.reply_text(
+                f"{'👑 ' if has_vip_badge(context) else ''}📊 Tomar Status\n\n"
+                f"🎭 Mode: {mode_now}\n🔥 Streak: {streak} days\n"
+                f"💰 Points: {points}\n👥 Invites: {inv}\n"
+                f"🌐 Language: {lang_now.capitalize()}\n\n"
+                f"Premium: {'✅' if has_premium_reply(context) else '🔒'} | "
+                f"Romantic: {'✅' if has_romantic_mode(context) else '🔒'}\n/shop",
+                reply_markup=build_mode_keyboard(context)
+            )
+            return
+
+        if user_text_stripped == "🎁 Invite":
+            bot_username = (await context.bot.get_me()).username
+            link = get_invite_link(bot_username, user_id)
+            inv  = context.user_data.get("invite_count", 0)
+            await update.message.reply_text(
+                f"🎁 Invite link:\n{link}\n\nInvited: {inv}\n\n"
+                f"3 → 😏 Romantic\n5 → 🎧 Voice\n10 → 👑 VIP",
+                reply_markup=build_mode_keyboard(context)
+            )
+            return
+
+        if any(kw in user_text_lower for kw in VOICE_CHAT_TRIGGERS) and not is_owner(context, user_id):
+            if not has_premium_reply(context) and not has_voice_unlocked(context):
+                need = INVITE_VOICE_THRESHOLD - context.user_data.get("invite_count", 0)
+                await update.message.reply_text(
+                    f"🎧 Personal voice chat ekhon available na...\n\n"
+                    f"Unlock: 💰 /shop ({PREMIUM_REPLY_COST} pts) | 👥 {need} invite /invite\n\n"
+                    "Streak diye points joma dao! 🔓",
+                    reply_markup=build_mode_keyboard(context)
+                )
+                return
+
+        points_earned, streak = check_and_update_streak(context)
+        if points_earned > 0:
+            await update.message.reply_text(
+                f"🔥 Day {streak} streak! +{points_earned} pts! 💰 Total: {get_user_points(context)}"
+            )
+
+        await update.message.chat.send_action(action="typing")
+        await asyncio.sleep(1.0)
+
+        if not context.user_data.get("lang_locked", False):
+            if "bangla te bolo" in user_text_lower or "bangla bolo" in user_text_lower:
+                context.user_data["lang"] = "bangla"
+            elif "banglish e bolo" in user_text_lower or "banglish bolo" in user_text_lower:
+                context.user_data["lang"] = "banglish"
+            elif ("english e bolo" in user_text_lower or "english bolo" in user_text_lower
+                  or "speak english" in user_text_lower):
+                context.user_data["lang"] = "english"
+            else:
+                context.user_data["lang"] = detect_language(user_text)
+        lang = context.user_data.get("lang", "banglish")
+
+        username = (update.message.from_user.username or "").lower()
+        is_apu   = (username == SPECIAL_APU_USERNAME.lstrip("@").lower())
+
+        if is_owner(context, user_id):
+            mode      = "owner"
+            user_name = context.user_data.get("custom_name", OWNER_NAME)
+        elif is_apu:
+            mode      = "apu"
+            user_name = "Apu"
+        else:
+            mode      = get_user_mode(context)
+            user_name = context.user_data.get("custom_name",
+                            update.message.from_user.first_name or "tumi")
+
+        if is_owner(context, user_id):
+            salam = get_daily_salam(context, user_name)
+            if salam:
+                await update.message.reply_text(salam)
+
+        premium       = has_premium_reply(context)
+        chat_history  = context.user_data.get("history", [])
         system_prompt = build_system_prompt(lang, user_name, mode, premium=premium)
 
         api_messages = [{"role": "system", "content": system_prompt}] + chat_history
@@ -936,7 +1211,11 @@ async def daily_salam_job(context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update, context: ContextTypes.DEFAULT_TYPE):
     err = str(context.error).lower()
     if "conflict" in err:
-        print("⚠️ Conflict: another instance detected")
+        print("⚠️  Conflict detected — this instance will keep running. "
+              "Stop any other instances to resolve.")
+    elif "terminated by other getupdates" in str(context.error).lower():
+        print("⚠️  Another instance took over polling. Restarting in 10s...")
+        await asyncio.sleep(10)
     else:
         print(f"❌ Bot error: {context.error}")
 
@@ -971,61 +1250,86 @@ def self_ping():
 # MAIN
 # =========================
 def main():
-    if not TELEGRAM_TOKEN: raise ValueError("TELEGRAM_TOKEN not set!")
-    if not GROQ_API_KEY:   raise ValueError("GROQ_API_KEY not set!")
-    if not OWNER_PHONE:    print("⚠️ OWNER_PHONE not set — owner verification disabled")
+    if not acquire_instance_lock():
+        sys.exit(1)
 
-    threading.Thread(target=run_web,   daemon=True).start()
-    threading.Thread(target=self_ping, daemon=True).start()
-    print(f"🌐 Web on port {os.environ.get('PORT', 8000)} | 🔁 Self-ping started")
+    try:
+        if not TELEGRAM_TOKEN:
+            raise ValueError("TELEGRAM_TOKEN not set!")
+        if not api_keys:
+            raise ValueError("No GROQ_API_KEY(s) configured!")
+        if not OWNER_PHONE:
+            print("⚠️ OWNER_PHONE not set — owner verification disabled")
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+        threading.Thread(target=run_web,   daemon=True).start()
+        threading.Thread(target=self_ping, daemon=True).start()
+        print(f"🌐 Web on port {os.environ.get('PORT', 8000)} | 🔁 Self-ping started")
+        print(f"🔑 API key rotation: {len(api_keys)} key(s) loaded")
+        print(f"   Add more keys via GROQ_API_KEY_1, GROQ_API_KEY_2, ... env vars")
 
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-    async def delete_webhook():
-        await app.bot.delete_webhook(drop_pending_updates=True)
-        print("🔗 Webhook cleared")
+        app = (
+            ApplicationBuilder()
+            .token(TELEGRAM_TOKEN)
+            .connect_timeout(30)
+            .read_timeout(30)
+            .write_timeout(30)
+            .pool_timeout(30)
+            .build()
+        )
 
-    loop.run_until_complete(delete_webhook())
-    time.sleep(5)
+        async def delete_webhook():
+            await app.bot.delete_webhook(drop_pending_updates=True)
+            print("🔗 Webhook cleared — polling mode active")
 
-    app.add_handler(CommandHandler("start",    start))
-    app.add_handler(CommandHandler("setname",  setname))
-    app.add_handler(CommandHandler("gf",       mode_gf))
-    app.add_handler(CommandHandler("roast",    mode_roast))
-    app.add_handler(CommandHandler("sad",      mode_sad))
-    app.add_handler(CommandHandler("friendly", mode_friendly))
-    app.add_handler(CommandHandler("love",     mode_love))
-    app.add_handler(CommandHandler("special",  mode_special))
-    app.add_handler(CommandHandler("romantic", mode_romantic))
-    app.add_handler(CommandHandler("modes",    modes_command))
-    app.add_handler(CommandHandler("streak",   streak_command))
-    app.add_handler(CommandHandler("invite",   invite_command))
-    app.add_handler(CommandHandler("shop",     shop_command))
-    app.add_handler(CommandHandler("bangla",   lang_bangla))
-    app.add_handler(CommandHandler("banglish", lang_banglish))
-    app.add_handler(CommandHandler("english",  lang_english))
-    app.add_handler(CommandHandler("autolang", lang_auto))
+        loop.run_until_complete(delete_webhook())
+        time.sleep(3)
 
-    app.add_handler(CallbackQueryHandler(shop_callback, pattern="^buy_"))
-    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(error_handler)
+        app.add_handler(CommandHandler("start",    start))
+        app.add_handler(CommandHandler("setname",  setname))
+        app.add_handler(CommandHandler("gf",       mode_gf))
+        app.add_handler(CommandHandler("roast",    mode_roast))
+        app.add_handler(CommandHandler("sad",      mode_sad))
+        app.add_handler(CommandHandler("friendly", mode_friendly))
+        app.add_handler(CommandHandler("love",     mode_love))
+        app.add_handler(CommandHandler("special",  mode_special))
+        app.add_handler(CommandHandler("romantic", mode_romantic))
+        app.add_handler(CommandHandler("modes",    modes_command))
+        app.add_handler(CommandHandler("streak",   streak_command))
+        app.add_handler(CommandHandler("invite",   invite_command))
+        app.add_handler(CommandHandler("shop",     shop_command))
+        app.add_handler(CommandHandler("bangla",   lang_bangla))
+        app.add_handler(CommandHandler("banglish", lang_banglish))
+        app.add_handler(CommandHandler("english",  lang_english))
+        app.add_handler(CommandHandler("autolang", lang_auto))
 
-    jq = app.job_queue
-    if jq:
-        jq.run_daily(daily_salam_job,   time=dt_time(hour=9,  minute=0,  tzinfo=BD_TZ))
-        jq.run_daily(auto_good_morning, time=dt_time(hour=8,  minute=0,  tzinfo=BD_TZ))
-        jq.run_daily(auto_midday_check, time=dt_time(hour=13, minute=0,  tzinfo=BD_TZ))
-        jq.run_daily(auto_goodnight,    time=dt_time(hour=23, minute=0,  tzinfo=BD_TZ))
-        print("✅ Jobs: 8AM 🌅 | 9AM 🌙 | 1PM ☀️ | 11PM 🌙 (BD time)")
-    else:
-        print("❌ job-queue missing! pip install 'python-telegram-bot[job-queue]'")
+        app.add_handler(CallbackQueryHandler(shop_callback, pattern="^buy_"))
+        app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        app.add_error_handler(error_handler)
 
-    print("💖 Zoya Bot running! (Tri-language: English | Bangla | Banglish)")
-    app.run_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"])
+        jq = app.job_queue
+        if jq:
+            jq.run_daily(daily_salam_job,   time=dt_time(hour=9,  minute=0,  tzinfo=BD_TZ))
+            jq.run_daily(auto_good_morning, time=dt_time(hour=8,  minute=0,  tzinfo=BD_TZ))
+            jq.run_daily(auto_midday_check, time=dt_time(hour=13, minute=0,  tzinfo=BD_TZ))
+            jq.run_daily(auto_goodnight,    time=dt_time(hour=23, minute=0,  tzinfo=BD_TZ))
+            print("✅ Jobs: 8AM 🌅 | 9AM 🌙 | 1PM ☀️ | 11PM 🌙 (BD time)")
+        else:
+            print("❌ job-queue missing! pip install 'python-telegram-bot[job-queue]'")
+
+        print("💖 Zoya Bot running! (Tri-language: English | Bangla | Banglish)")
+        app.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"],
+            timeout=20,
+            poll_interval=0.5,
+        )
+    finally:
+        release_instance_lock()
+        print("🔓 Instance lock released")
 
 
 if __name__ == "__main__":
