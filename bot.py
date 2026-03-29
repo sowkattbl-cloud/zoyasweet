@@ -579,150 +579,133 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         button = KeyboardButton("📱 Share my number", request_contact=True)
         await update.message.reply_text(
             "Assalamu Alaikum! 💖\n"
-            "Ami Zoya — share your number to verify, or just start chatting 😊\n\n"
-            "🌐 I can talk in:\n"
-            "  🇧🇩 Bangla (বাংলা)\n"
-            "  🔤 Banglish (tomar moto kore)\n"
-            "  🇬🇧 English\n\n"
-            "Just write in any language — I'll understand! 💬",
-            reply_markup=ReplyKeyboardMarkup([[button]], one_time_keyboard=True, resize_keyboard=True)
+            "Ami Zoya — tomar personal AI companion 😊\n\n"
+            "Shuru korte number share koro 👇",
+            reply_markup=ReplyKeyboardMarkup(
+                [[button]], resize_keyboard=True, one_time_keyboard=True
+            )
+        )
+        return
+
+    await update.message.reply_text(
+        "Assalamu Alaikum! 💖 Ami Zoya!\nKemon acho tumi?",
+        reply_markup=build_mode_keyboard(context)
+    )
+
+# =========================
+# CONTACT HANDLER
+# =========================
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    contact = update.message.contact
+    user_id = update.message.from_user.id
+
+    if contact.user_id != user_id:
+        await update.message.reply_text("Nijei share koro please 🙏")
+        return
+
+    shared_phone = normalize_phone(contact.phone_number.lstrip("+"))
+    owner_phone  = normalize_phone(OWNER_PHONE.lstrip("+"))
+
+    if shared_phone == owner_phone or shared_phone.endswith(owner_phone) or owner_phone.endswith(shared_phone):
+        context.bot_data["owner_user_id"]  = user_id
+        context.bot_data["owner_chat_id"]  = update.message.chat_id
+        context.user_data["custom_name"]   = OWNER_NAME
+        await update.message.reply_text(
+            f"💖 Assalamu Alaikum {OWNER_NAME}!\nAmi Zoya — tomar jonyo 😊",
+            reply_markup=build_mode_keyboard(context)
         )
     else:
         await update.message.reply_text(
-            "Assalamu Alaikum! 💖\n"
-            "Ami Zoya — kemon acho? 😊\n\n"
-            "🌐 Amar sathe kotha bolo:\n"
-            "  🇧🇩 বাংলায় লিখলে বাংলায় বলব\n"
-            "  🔤 Banglish e likhle banglish e bolbo\n"
-            "  🇬🇧 English e likhle English e bolbo\n\n"
-            "👇 Mode choose koro!",
+            "Assalamu Alaikum! 💖 Ami Zoya!\nKemon acho?",
             reply_markup=build_mode_keyboard(context)
         )
 
+# =========================
+# LANGUAGE BUTTON MAP
+# =========================
+LANG_BUTTON_MAP = {
+    "🇧🇩 Bangla":   "bangla",
+    "🔤 Banglish": "banglish",
+    "🇬🇧 English":  "english",
+}
+
+# =========================
+# VOICE TRIGGERS
+# =========================
+VOICE_CHAT_TRIGGERS = [
+    "voice chat", "voice call", "audio call", "call me",
+    "kotha bolo", "phone koro", "ami sunbo", "voice e bolo",
+]
+
+# =========================
+# COMMANDS
+# =========================
 async def setname(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
-        name = " ".join(context.args)
+        name = " ".join(context.args).strip()
         context.user_data["custom_name"] = name
-        await update.message.reply_text(f"Ami tomake {name} bole dakbo 😊")
+        await update.message.reply_text(f"✅ Name set to: {name} 😊",
+                                        reply_markup=build_mode_keyboard(context))
     else:
-        await update.message.reply_text("Usage: /setname YourName")
+        await update.message.reply_text("Usage: /setname YourName",
+                                        reply_markup=build_mode_keyboard(context))
 
-# =========================
-# LANGUAGE COMMANDS
-# =========================
-async def lang_bangla(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["lang"]        = "bangla"
-    context.user_data["lang_locked"] = True
-    await update.message.reply_text(
-        "🇧🇩 ঠিক আছে! এখন থেকে আমি বাংলায় কথা বলব 😊",
-        reply_markup=build_mode_keyboard(context)
-    )
-
-async def lang_banglish(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["lang"]        = "banglish"
-    context.user_data["lang_locked"] = True
-    await update.message.reply_text(
-        "🔤 Ok! Ekhon theke ami banglish e bolbo 😊",
-        reply_markup=build_mode_keyboard(context)
-    )
-
-async def lang_english(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["lang"]        = "english"
-    context.user_data["lang_locked"] = True
-    await update.message.reply_text(
-        "🇬🇧 Got it! I'll speak English from now on 😊",
-        reply_markup=build_mode_keyboard(context)
-    )
-
-async def lang_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["lang_locked"] = False
-    await update.message.reply_text(
-        "🔄 Auto language mode on! I'll match whatever language you write in 😊",
-        reply_markup=build_mode_keyboard(context)
-    )
-
-# =========================
-# MODE COMMANDS
-# =========================
 async def mode_gf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_user_mode(context, "gf")
-    name = context.user_data.get("custom_name", update.message.from_user.first_name or "tumi")
-    await update.message.reply_text(
-        f"💕 Girlfriend mode on! Ekhon ami tomar Zoya 😊\nKi bolbe, {name}?",
-        reply_markup=build_mode_keyboard(context)
-    )
+    await update.message.reply_text("💕 Girlfriend mode on!", reply_markup=build_mode_keyboard(context))
 
 async def mode_roast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_user_mode(context, "roast")
-    await update.message.reply_text("🔥 Roast mode on! Prepare yourself... 😈",
-                                    reply_markup=build_mode_keyboard(context))
+    await update.message.reply_text("🔥 Roast mode on!", reply_markup=build_mode_keyboard(context))
 
 async def mode_sad(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_user_mode(context, "sad")
-    await update.message.reply_text("🫂 Ami achi tomar sathe... kemon lagche? 💙",
-                                    reply_markup=build_mode_keyboard(context))
+    await update.message.reply_text("🫂 Ami sunchi...", reply_markup=build_mode_keyboard(context))
 
 async def mode_friendly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_user_mode(context, "friendly")
-    await update.message.reply_text("😊 Friendly mode! Kemon acho?",
-                                    reply_markup=build_mode_keyboard(context))
+    await update.message.reply_text("😊 Friendly mode!", reply_markup=build_mode_keyboard(context))
 
 async def mode_love(update: Update, context: ContextTypes.DEFAULT_TYPE):
     success, err_msg = try_set_mode(context, "love")
-    msg = "💘 Love % mode on! Kar sathe check korbo?" if success else err_msg
-    await update.message.reply_text(msg, reply_markup=build_mode_keyboard(context))
-
-async def mode_special(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    success, err_msg = try_set_mode(context, "special")
-    msg = "✨ Secret mode... kache eso 🤫" if success else err_msg
-    await update.message.reply_text(msg, reply_markup=build_mode_keyboard(context))
-
-async def mode_romantic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    success, err_msg = try_set_mode(context, "romantic")
-    msg = "😏 Romantic mode on... 💕" if success else err_msg
-    await update.message.reply_text(msg, reply_markup=build_mode_keyboard(context))
-
-async def modes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    current = get_user_mode(context)
-    pts     = get_user_points(context)
-    inv     = context.user_data.get("invite_count", 0)
-    p_st    = "✅" if has_premium_reply(context) else f"🔒 ({PREMIUM_REPLY_COST} pts)"
-    r_st    = "✅" if has_romantic_mode(context) else f"🔒 ({max(0, INVITE_ROMANTIC_THRESHOLD - inv)} invites)"
     await update.message.reply_text(
-        f"🎭 Zoya Modes\nCurrent: {MODE_LABELS.get(current, current)}\n\n"
-        f"🆓 Free:\n  /gf 💕  /roast 🔥  /sad 🫂  /friendly 😊\n\n"
-        f"💰 Premium ({pts} pts):\n  /love 💘 {p_st}\n  /special ✨ {p_st}\n\n"
-        f"🎁 Invite:\n  /romantic 😏 {r_st}\n\n"
-        f"🌐 Language:\n  /bangla 🇧🇩  /banglish 🔤  /english 🇬🇧  /autolang 🔄\n\n"
-        f"/streak • /invite • /shop",
+        "💘 Love % mode on! Kar sathe check korbo?" if success else err_msg,
         reply_markup=build_mode_keyboard(context)
     )
 
-# =========================
-# STREAK
-# =========================
+async def mode_special(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    success, err_msg = try_set_mode(context, "special")
+    await update.message.reply_text(
+        "✨ Secret mode... kache eso 🤫" if success else err_msg,
+        reply_markup=build_mode_keyboard(context)
+    )
+
+async def mode_romantic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    success, err_msg = try_set_mode(context, "romantic")
+    await update.message.reply_text(
+        "😏 Romantic mode on... 💕" if success else err_msg,
+        reply_markup=build_mode_keyboard(context)
+    )
+
+async def modes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎭 Available Modes:\n\n"
+        "Free: /gf /roast /sad /friendly\n"
+        "Premium (60pts): /love /special\n"
+        "Invite (3 friends): /romantic\n\n"
+        "Current: " + MODE_LABELS.get(get_user_mode(context), get_user_mode(context)),
+        reply_markup=build_mode_keyboard(context)
+    )
+
 async def streak_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     streak = context.user_data.get("streak", 0)
     points = get_user_points(context)
-    inv    = context.user_data.get("invite_count", 0)
-    last   = context.user_data.get("last_streak_date", "Never")
-    lang   = context.user_data.get("lang", "auto")
-    msg = (
-        f"{'👑 ' if has_vip_badge(context) else ''}🔥 Tomar Status\n\n"
-        f"⚡ Streak: {streak} days\n💰 Points: {points}\n"
-        f"👥 Invites: {inv}\n📅 Last: {last}\n"
-        f"🌐 Language: {lang.capitalize()}\n\n"
-        f"💬 Premium: {'✅' if has_premium_reply(context) else f'🔒 {PREMIUM_REPLY_COST} pts'}\n"
-        f"😏 Romantic: {'✅' if has_romantic_mode(context) else f'🔒 {INVITE_ROMANTIC_THRESHOLD} invites'}\n"
-        f"🎧 Voice: {'✅' if has_voice_unlocked(context) else f'🔒 {INVITE_VOICE_THRESHOLD} invites'}"
+    await update.message.reply_text(
+        f"🔥 Streak: {streak} days\n💰 Points: {points}\n\n"
+        f"Everyday message kore streak badao! 🎯",
+        reply_markup=build_mode_keyboard(context)
     )
-    if has_vip_badge(context):
-        msg += "\n\n👑 You have the VIP Badge!"
-    await update.message.reply_text(msg, reply_markup=build_mode_keyboard(context))
 
-# =========================
-# INVITE
-# =========================
 async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id      = update.message.from_user.id
     bot_username = (await context.bot.get_me()).username
@@ -730,252 +713,78 @@ async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     inv          = context.user_data.get("invite_count", 0)
     await update.message.reply_text(
         f"🎁 Tomar invite link:\n{link}\n\n"
-        f"👥 Invited: {inv} friends\n\n"
-        f"3 → 😏 Romantic mode\n5 → 🎧 Voice\n10 → 👑 VIP Badge",
+        f"Invited: {inv} jon\n\n"
+        f"3 jon → 😏 Romantic mode\n"
+        f"5 jon → 🎧 Voice messages\n"
+        f"10 jon → 👑 VIP badge",
         reply_markup=build_mode_keyboard(context)
     )
 
-# =========================
-# SHOP
-# =========================
 async def shop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     points = get_user_points(context)
-    keyboard = [
-        [InlineKeyboardButton(f"💬 Premium + Love/Special ({PREMIUM_REPLY_COST} pts)", callback_data="buy_premium")],
-        [InlineKeyboardButton(f"😏 Romantic Mode ({ROMANTIC_MODE_COST} pts)",          callback_data="buy_romantic")],
-    ]
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"💘 Premium Reply (60pts)", callback_data="buy_premium")],
+        [InlineKeyboardButton(f"😏 Romantic Mode (99pts)", callback_data="buy_romantic")],
+    ])
     await update.message.reply_text(
-        f"🛍️ Zoya's Shop\n\n💰 Tomar Points: {points}\n\nKi kinbe?",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        f"🛒 Zoya's Shop\n\n💰 Tomar points: {points}\n\n"
+        f"Streak diye points joma dao protidin! 🔥",
+        reply_markup=keyboard
     )
 
 async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query  = update.callback_query
+    query = update.callback_query
     await query.answer()
     data   = query.data
     points = get_user_points(context)
+
     if data == "buy_premium":
         if deduct_points(context, PREMIUM_REPLY_COST):
             context.user_data["premium_reply_active"] = True
-            await query.edit_message_text(f"✅ Premium unlock! 💬\nBaki: {get_user_points(context)} pts")
+            await query.edit_message_text(
+                f"✅ Premium Reply unlocked! 💖\nPoints remaining: {get_user_points(context)}"
+            )
         else:
-            await query.edit_message_text(f"❌ Kom points. Tomar: {points} | Darkar: {PREMIUM_REPLY_COST}")
+            await query.edit_message_text(
+                f"❌ Points kom! Tomar: {points} | Darkar: {PREMIUM_REPLY_COST}\n"
+                f"Streak diye points joma dao! 🔥"
+            )
     elif data == "buy_romantic":
-        if has_romantic_mode(context):
-            await query.edit_message_text("😏 Already active!")
-        elif deduct_points(context, ROMANTIC_MODE_COST):
+        if deduct_points(context, ROMANTIC_MODE_COST):
             context.user_data["romantic_mode_active"] = True
-            await query.edit_message_text(f"✅ Romantic unlock! 😏💕\nBaki: {get_user_points(context)} pts")
+            await query.edit_message_text(
+                f"✅ Romantic Mode unlocked! 😏💕\nPoints remaining: {get_user_points(context)}"
+            )
         else:
-            await query.edit_message_text(f"❌ Kom points. Tomar: {points} | Darkar: {ROMANTIC_MODE_COST}")
-
-# =========================
-# CONTACT
-# =========================
-async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contact      = update.message.contact
-    user_id      = update.message.from_user.id
-    shared_phone = normalize_phone(contact.phone_number)
-    owner_phone  = normalize_phone(OWNER_PHONE)
-    if shared_phone == owner_phone or shared_phone.lstrip("+") == owner_phone.lstrip("+"):
-        context.bot_data["owner_user_id"]  = user_id
-        context.bot_data["owner_chat_id"]  = update.message.chat_id
-        context.user_data["lang"]          = "banglish"
-        context.user_data["lang_locked"]   = True
-        await update.message.reply_text(
-            f"💖 Assalamu Alaikum {OWNER_NAME}!\nAmi Zoya — tomar jonyo wait korchilam 😊",
-            reply_markup=ReplyKeyboardRemove()
-        )
-    else:
-        await update.message.reply_text(
-            "Assalamu Alaikum! 💖 Kemon acho? 😊\n👇 Mode choose koro!",
-            reply_markup=build_mode_keyboard(context)
-        )
-
-# =========================
-# VOICE CHAT GATE
-# =========================
-VOICE_CHAT_TRIGGERS = [
-    "voice chat","voice call","call karo","call dao","personal call",
-    "video call","live bolo","live chat","call korte","call korbo",
-    "voice er sathe","tomar awaz","tomar voice","personal voice",
-    "direct call","call nao",
-]
-
-LANG_BUTTON_MAP = {
-    "🇧🇩 Bangla":  "bangla",
-    "🔤 Banglish": "banglish",
-    "🇬🇧 English": "english",
-}
-
-# =========================
-# MESSAGE HANDLER
-# =========================
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user_text          = update.message.text
-        user_id            = update.message.from_user.id
-        user_text_stripped = user_text.strip()
-        user_text_lower    = user_text_stripped.lower()
-
-        if is_owner(context, user_id):
-            context.bot_data["owner_chat_id"] = update.message.chat_id
-
-        now = time.time()
-        if user_id in last_used and now - last_used[user_id] < 2:
-            await update.message.chat.send_action(action="typing")
-            return
-        last_used[user_id] = now
-
-        if user_text_stripped in LANG_BUTTON_MAP:
-            chosen = LANG_BUTTON_MAP[user_text_stripped]
-            context.user_data["lang"]        = chosen
-            context.user_data["lang_locked"] = True
-            confirm = {
-                "bangla":   "🇧🇩 ঠিক আছে! এখন থেকে বাংলায় কথা বলব 😊",
-                "banglish": "🔤 Ok! Ekhon theke banglish e bolbo 😊",
-                "english":  "🇬🇧 Got it! I'll speak English from now on 😊",
-            }
-            await update.message.reply_text(confirm[chosen],
-                                            reply_markup=build_mode_keyboard(context))
-            return
-
-        for btn_text, mode_key in MODE_BUTTONS.items():
-            if user_text_stripped == btn_text or user_text_lower == btn_text.lower():
-                success, err_msg = try_set_mode(context, mode_key)
-                labels = {
-                    "gf":       "💕 Girlfriend mode on!",
-                    "roast":    "🔥 Roast mode on!",
-                    "sad":      "🫂 Ami sunchi tomar katha...",
-                    "friendly": "😊 Friendly mode!",
-                    "love":     "💘 Love % mode on! Kar sathe check korbo?",
-                    "special":  "✨ Secret mode... kache eso 🤫",
-                    "romantic": "😏 Romantic mode on... 💕",
-                }
-                await update.message.reply_text(
-                    labels.get(mode_key, "Mode on!") if success else err_msg,
-                    reply_markup=build_mode_keyboard(context)
-                )
-                return
-
-        for btn_text, mode_key in [
-            ("💘 Love % 🔒","love"),   ("💘 Love % ✅","love"),
-            ("✨ Special 🔒","special"),("✨ Special ✅","special"),
-            ("😏 Romantic 🔒","romantic"),("😏 Romantic ✅","romantic"),
-        ]:
-            if user_text_stripped == btn_text:
-                success, err_msg = try_set_mode(context, mode_key)
-                labels = {
-                    "love":     "💘 Love % mode on!",
-                    "special":  "✨ Secret mode... 🤫",
-                    "romantic": "😏 Romantic mode on... 💕",
-                }
-                await update.message.reply_text(
-                    labels.get(mode_key, "Mode on!") if success else err_msg,
-                    reply_markup=build_mode_keyboard(context)
-                )
-                return
-
-        if user_text_stripped == "📊 My Status":
-            streak   = context.user_data.get("streak", 0)
-            points   = get_user_points(context)
-            inv      = context.user_data.get("invite_count", 0)
-            mode_now = MODE_LABELS.get(get_user_mode(context), get_user_mode(context))
-            lang_now = context.user_data.get("lang", "auto")
-            await update.message.reply_text(
-                f"{'👑 ' if has_vip_badge(context) else ''}📊 Tomar Status\n\n"
-                f"🎭 Mode: {mode_now}\n🔥 Streak: {streak} days\n"
-                f"💰 Points: {points}\n👥 Invites: {inv}\n"
-                f"🌐 Language: {lang_now.capitalize()}\n\n"
-                f"Premium: {'✅' if has_premium_reply(context) else '🔒'} | "
-                f"Romantic: {'✅' if has_romantic_mode(context) else '🔒'}\n/shop",
-                reply_markup=build_mode_keyboard(context)
-            )
-            return
-
-        if user_text_stripped == "🎁 Invite":
-            bot_username = (await context.bot.get_me()).username
-            link = get_invite_link(bot_username, user_id)
-            inv  = context.user_data.get("invite_count", 0)
-            await update.message.reply_text(
-                f"🎁 Invite link:\n{link}\n\nInvited: {inv}\n\n"
-                f"3 → 😏 Romantic\n5 → 🎧 Voice\n10 → 👑 VIP",
-                reply_markup=build_mode_keyboard(context)
-            )
-            return
-
-        if any(kw in user_text_lower for kw in VOICE_CHAT_TRIGGERS) and not is_owner(context, user_id):
-            if not has_premium_reply(context) and not has_voice_unlocked(context):
-                need = INVITE_VOICE_THRESHOLD - context.user_data.get("invite_count", 0)
-                await update.message.reply_text(
-                    f"🎧 Personal voice chat ekhon available na...\n\n"
-                    f"Unlock: 💰 /shop ({PREMIUM_REPLY_COST} pts) | 👥 {need} invite /invite\n\n"
-                    "Streak diye points joma dao! 🔓",
-                    reply_markup=build_mode_keyboard(context)
-                )
-                return
-
-        points_earned, streak = check_and_update_streak(context)
-        if points_earned > 0:
-            await update.message.reply_text(
-                f"🔥 Day {streak} streak! +{points_earned} pts! 💰 Total: {get_user_points(context)}"
+            await query.edit_message_text(
+                f"❌ Points kom! Tomar: {points} | Darkar: {ROMANTIC_MODE_COST}\n"
+                f"Streak diye points joma dao! 🔥"
             )
 
-        await update.message.chat.send_action(action="typing")
-        await asyncio.sleep(1.0)
+async def lang_bangla(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["lang"]        = "bangla"
+    context.user_data["lang_locked"] = True
+    await update.message.reply_text("🇧🇩 এখন থেকে বাংলায় কথা বলব 😊",
+                                    reply_markup=build_mode_keyboard(context))
 
-        if not context.user_data.get("lang_locked", False):
-            if "bangla te bolo" in user_text_lower or "bangla bolo" in user_text_lower:
-                context.user_data["lang"] = "bangla"
-            elif "banglish e bolo" in user_text_lower or "banglish bolo" in user_text_lower:
-                context.user_data["lang"] = "banglish"
-            elif ("english e bolo" in user_text_lower or "english bolo" in user_text_lower
-                  or "speak english" in user_text_lower):
-                context.user_data["lang"] = "english"
-            else:
-                context.user_data["lang"] = detect_language(user_text)
-        lang = context.user_data.get("lang", "banglish")
+async def lang_banglish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["lang"]        = "banglish"
+    context.user_data["lang_locked"] = True
+    await update.message.reply_text("🔤 Ok! Ekhon theke banglish e bolbo 😊",
+                                    reply_markup=build_mode_keyboard(context))
 
-        username = (update.message.from_user.username or "").lower()
-        is_apu   = (username == SPECIAL_APU_USERNAME.lstrip("@").lower())
+async def lang_english(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["lang"]        = "english"
+    context.user_data["lang_locked"] = True
+    await update.message.reply_text("🇬🇧 Got it! I'll speak English from now on 😊",
+                                    reply_markup=build_mode_keyboard(context))
 
-        if is_owner(context, user_id):
-            mode      = "owner"
-            user_name = context.user_data.get("custom_name", OWNER_NAME)
-        elif is_apu:
-            mode      = "apu"
-            user_name = "Apu"
-        else:
-            mode      = get_user_mode(context)
-            user_name = context.user_data.get("custom_name",
-                            update.message.from_user.first_name or "tumi")
+async def lang_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["lang_locked"] = False
+    context.user_data.pop("lang", None)
+    await update.message.reply_text("🔄 Auto-language detection on!",
+                                    reply_markup=build_mode_keyboard(context))
 
-        if is_owner(context, user_id):
-            salam = get_daily_salam(context, user_name)
-            if salam:
-                await update.message.reply_text(salam)
-
-        premium      = has_premium_reply(context)
-        chat_history = context.user_data.get("history", [])
-        system_prompt = build_system_prompt(lang, user_name, mode, premium=premium)
-
-        api_messages = [{"role": "system", "content": system_prompt}] + chat_history
-        api_messages.append({"role": "user", "content": user_text})
-
-        reply = get_ai_reply(api_messages)
-
-            if "rate" in err or "429" in err or "quota" in err or "limit" in err:
-                retry_after = 60
-                try:
-                    import re
-                    m = re.search(r"retry.after.*?(\d+)", err)
-                    if m:
-                        retry_after = int(m.group(1))
-                except Exception:
-                    pass
-                key_manager.mark_rate_limited(key_idx, retry_after=retry_after)
-                time.sleep(2)
-                continue
 # =========================
 # MESSAGE HANDLER
 # =========================
