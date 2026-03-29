@@ -966,8 +966,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reply = get_ai_reply(api_messages)
 
-        if re **...**
-
+            if "rate" in err or "429" in err or "quota" in err or "limit" in err:
+                retry_after = 60
+                try:
+                    import re
+                    m = re.search(r"retry.after.*?(\d+)", err)
+                    if m:
+                        retry_after = int(m.group(1))
+                except Exception:
+                    pass
+                key_manager.mark_rate_limited(key_idx, retry_after=retry_after)
+                time.sleep(2)
+                continue
 # =========================
 # MESSAGE HANDLER
 # =========================
