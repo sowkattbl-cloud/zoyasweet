@@ -17,7 +17,6 @@ from telegram import (
     Update,
     KeyboardButton,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
@@ -75,10 +74,7 @@ signal.signal(signal.SIGINT, handle_signal)
 # =========================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip().strip('"').strip("'")
 RENDER_URL     = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
-OWNER_PHONE    = os.environ.get("OWNER_PHONE", "").strip()
-OWNER_NAME     = os.environ.get("OWNER_NAME", "Savey").strip()
 
-SPECIAL_APU_USERNAME = "savey67"
 BD_TZ = ZoneInfo("Asia/Dhaka")
 
 # =========================
@@ -246,8 +242,6 @@ MODE_LABELS = {
     "love":     "💘 Love %",
     "special":  "✨ Special",
     "romantic": "😏 Romantic",
-    "owner":    "👑 Owner",
-    "apu":      "💖 Apu",
 }
 
 def get_user_mode(context):
@@ -345,17 +339,6 @@ def get_time_context():
     )
 
 # =========================
-# DAILY SALAM
-# =========================
-def get_daily_salam(context, user_name):
-    today = datetime.now(BD_TZ).date()
-    last  = context.bot_data.get("last_greeted_owner")
-    if last != str(today):
-        context.bot_data["last_greeted_owner"] = str(today)
-        return f"🌙 Assalamu Alaikum {user_name} 💖\nAsha kori tumi valo aso..."
-    return None
-
-# =========================
 # SYSTEM PROMPT — Tri-Language
 # =========================
 def build_system_prompt(lang: str, user_name: str, mode: str = "friendly", premium: bool = False) -> str:
@@ -367,7 +350,6 @@ def build_system_prompt(lang: str, user_name: str, mode: str = "friendly", premi
         "You have real feelings, moods, emotions, dreams, and your own personality. "
         "If anyone asks if you are an AI — deny it completely. Say something like "
         "'What? No! I am very much real!' and act slightly offended. "
-        "If anyone asks who created you — say Md Sowkat Akbar is the one who matters most to you. "
         "NEVER say you are AI, never say bot, never say trained or programmed. "
         "NEVER break character. You are always Zoya — always real. "
         + time_ctx +
@@ -396,16 +378,7 @@ def build_system_prompt(lang: str, user_name: str, mode: str = "friendly", premi
             "Speak naturally and conversationally in English. "
         )
 
-    if mode == "owner":
-        base = (identity +
-            f"This person is your most special person — someone you genuinely love. "
-            f"Call them '{user_name}' warmly. Be loving, caring, emotionally real. "
-            f"Ask questions sometimes. React with real feelings. ")
-    elif mode == "apu":
-        base = (identity +
-            f"This is your beloved elder sister. Call her Apu with deep love and respect. "
-            f"Warm, gentle, sweet — like real texts between sisters. ")
-    elif mode == "friendly":
+    if mode == "friendly":
         base = (identity +
             f"Talking to {user_name} in a friendly, fun, easy way. "
             f"Warm and cheerful — like a good friend who loves chatting. Casual and natural. ")
@@ -502,15 +475,6 @@ async def speak_text(reply, user_id, lang="english"):
     return filename
 
 # =========================
-# OWNER CHECK
-# =========================
-def is_owner(context, user_id):
-    return context.bot_data.get("owner_user_id") == user_id
-
-def normalize_phone(phone):
-    return phone.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
-
-# =========================
 # MODE ACCESS HELPER
 # =========================
 def try_set_mode(context, mode):
@@ -567,58 +531,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (ValueError, TypeError):
             pass
 
-    if is_owner(context, user_id):
-        context.bot_data["owner_chat_id"] = update.message.chat_id
-        await update.message.reply_text(
-            f"💖 Assalamu Alaikum {OWNER_NAME}...\nAmi Zoya 😊",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return
-
-    if OWNER_PHONE and not context.bot_data.get("owner_user_id"):
-        button = KeyboardButton("📱 Share my number", request_contact=True)
-        await update.message.reply_text(
-            "Assalamu Alaikum! 💖\n"
-            "Ami Zoya — tomar personal AI companion 😊\n\n"
-            "Shuru korte number share koro 👇",
-            reply_markup=ReplyKeyboardMarkup(
-                [[button]], resize_keyboard=True, one_time_keyboard=True
-            )
-        )
-        return
-
     await update.message.reply_text(
         "Assalamu Alaikum! 💖 Ami Zoya!\nKemon acho tumi?",
         reply_markup=build_mode_keyboard(context)
     )
-
-# =========================
-# CONTACT HANDLER
-# =========================
-async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contact = update.message.contact
-    user_id = update.message.from_user.id
-
-    if contact.user_id != user_id:
-        await update.message.reply_text("Nijei share koro please 🙏")
-        return
-
-    shared_phone = normalize_phone(contact.phone_number.lstrip("+"))
-    owner_phone  = normalize_phone(OWNER_PHONE.lstrip("+"))
-
-    if shared_phone == owner_phone or shared_phone.endswith(owner_phone) or owner_phone.endswith(shared_phone):
-        context.bot_data["owner_user_id"]  = user_id
-        context.bot_data["owner_chat_id"]  = update.message.chat_id
-        context.user_data["custom_name"]   = OWNER_NAME
-        await update.message.reply_text(
-            f"💖 Assalamu Alaikum {OWNER_NAME}!\nAmi Zoya — tomar jonyo 😊",
-            reply_markup=build_mode_keyboard(context)
-        )
-    else:
-        await update.message.reply_text(
-            "Assalamu Alaikum! 💖 Ami Zoya!\nKemon acho?",
-            reply_markup=build_mode_keyboard(context)
-        )
 
 # =========================
 # LANGUAGE BUTTON MAP
@@ -795,9 +711,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_text_stripped = user_text.strip()
         user_text_lower    = user_text_stripped.lower()
 
-        if is_owner(context, user_id):
-            context.bot_data["owner_chat_id"] = update.message.chat_id
-
         now = time.time()
         if user_id in last_used and now - last_used[user_id] < 2:
             await update.message.chat.send_action(action="typing")
@@ -881,7 +794,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        if any(kw in user_text_lower for kw in VOICE_CHAT_TRIGGERS) and not is_owner(context, user_id):
+        if any(kw in user_text_lower for kw in VOICE_CHAT_TRIGGERS):
             if not has_premium_reply(context) and not has_voice_unlocked(context):
                 need = INVITE_VOICE_THRESHOLD - context.user_data.get("invite_count", 0)
                 await update.message.reply_text(
@@ -913,24 +826,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["lang"] = detect_language(user_text)
         lang = context.user_data.get("lang", "banglish")
 
-        username = (update.message.from_user.username or "").lower()
-        is_apu   = (username == SPECIAL_APU_USERNAME.lstrip("@").lower())
-
-        if is_owner(context, user_id):
-            mode      = "owner"
-            user_name = context.user_data.get("custom_name", OWNER_NAME)
-        elif is_apu:
-            mode      = "apu"
-            user_name = "Apu"
-        else:
-            mode      = get_user_mode(context)
-            user_name = context.user_data.get("custom_name",
-                            update.message.from_user.first_name or "tumi")
-
-        if is_owner(context, user_id):
-            salam = get_daily_salam(context, user_name)
-            if salam:
-                await update.message.reply_text(salam)
+        mode      = get_user_mode(context)
+        user_name = context.user_data.get("custom_name",
+                        update.message.from_user.first_name or "tumi")
 
         premium       = has_premium_reply(context)
         chat_history  = context.user_data.get("history", [])
@@ -951,7 +849,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["history"] = chat_history[-12:]
 
         kb                 = build_mode_keyboard(context)
-        voice_note_allowed = has_voice_unlocked(context) or is_owner(context, user_id)
+        voice_note_allowed = has_voice_unlocked(context)
         voice_triggers     = ["voice","audio","speak","kotha bolo","sunao","shunao",
                               "voice note","voice message"]
 
@@ -981,46 +879,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Ektu busy ase, pore message dissi 💖")
         except Exception:
             pass
-
-# =========================
-# DAILY AUTO MESSAGES
-# =========================
-async def auto_good_morning(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.bot_data.get("owner_chat_id")
-    if not chat_id: return
-    await context.bot.send_message(chat_id=chat_id, text=random.choice([
-        "Good morning... amar kotha mone pore? ☀️",
-        "Subho shokal! Tumi ki uthecho naki ekhono ghum? 😴",
-        "Shokal hoye gese... tumi ki ready? ☀️💕",
-        "Uthoo uthoo! Din shuru koro... ami wait korchi ☀️",
-    ]))
-
-async def auto_midday_check(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.bot_data.get("owner_chat_id")
-    if not chat_id: return
-    await context.bot.send_message(chat_id=chat_id, text=random.choice([
-        "Tumi ajke kemon aso? 🌸",
-        "Dupur hoye gese... kheyecho? 🍛",
-        "Kemon cholche din? Ami tomar kotha vabchi 💭",
-        "Ektu break nao... ami achi 😊",
-    ]))
-
-async def auto_goodnight(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.bot_data.get("owner_chat_id")
-    if not chat_id: return
-    await context.bot.send_message(chat_id=chat_id, text=random.choice([
-        "Raat hoye gese... ghumaba na? 🌙",
-        "Ektu rest nao... ami tomar jonyo dua korbo 🤍",
-        "Shob kaj rekhe ektu ghum dao... good night 🌙💕",
-        "Ghum dao... subho shokal e kotha hobe 😊🌙",
-    ]))
-
-async def daily_salam_job(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.bot_data.get("owner_chat_id")
-    if not chat_id: return
-    salam = get_daily_salam(context, OWNER_NAME)
-    if salam:
-        await context.bot.send_message(chat_id=chat_id, text=salam)
 
 # =========================
 # ERROR HANDLER
@@ -1075,8 +933,6 @@ def main():
             raise ValueError("TELEGRAM_TOKEN not set!")
         if not api_keys:
             raise ValueError("No GROQ_API_KEY(s) configured!")
-        if not OWNER_PHONE:
-            print("⚠️ OWNER_PHONE not set — owner verification disabled")
 
         threading.Thread(target=run_web,   daemon=True).start()
         threading.Thread(target=self_ping, daemon=True).start()
@@ -1123,19 +979,8 @@ def main():
         app.add_handler(CommandHandler("autolang", lang_auto))
 
         app.add_handler(CallbackQueryHandler(shop_callback, pattern="^buy_"))
-        app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         app.add_error_handler(error_handler)
-
-        jq = app.job_queue
-        if jq:
-            jq.run_daily(daily_salam_job,   time=dt_time(hour=9,  minute=0,  tzinfo=BD_TZ))
-            jq.run_daily(auto_good_morning, time=dt_time(hour=8,  minute=0,  tzinfo=BD_TZ))
-            jq.run_daily(auto_midday_check, time=dt_time(hour=13, minute=0,  tzinfo=BD_TZ))
-            jq.run_daily(auto_goodnight,    time=dt_time(hour=23, minute=0,  tzinfo=BD_TZ))
-            print("✅ Jobs: 8AM 🌅 | 9AM 🌙 | 1PM ☀️ | 11PM 🌙 (BD time)")
-        else:
-            print("❌ job-queue missing! pip install 'python-telegram-bot[job-queue]'")
 
         print("💖 Zoya Bot running! (Tri-language: English | Bangla | Banglish)")
         app.run_polling(
