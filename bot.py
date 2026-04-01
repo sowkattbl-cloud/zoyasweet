@@ -26,6 +26,7 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    PicklePersistence,
     filters,
 )
 
@@ -143,6 +144,14 @@ api_keys = _load_api_keys()
 key_manager = APIKeyManager(api_keys)
 
 last_used = {}
+
+# =========================
+# USER TRACKING
+# =========================
+def track_user(context, user_id, chat_id):
+    users = context.bot_data.get("all_users", {})
+    users[user_id] = chat_id
+    context.bot_data["all_users"] = users
 
 # =========================
 # POINTS & STREAK
@@ -531,6 +540,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (ValueError, TypeError):
             pass
 
+    track_user(context, user_id, update.message.chat_id)
     await update.message.reply_text(
         "Assalamu Alaikum! 💖 Ami Zoya!\nKemon acho tumi?",
         reply_markup=build_mode_keyboard(context)
@@ -711,6 +721,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_text_stripped = user_text.strip()
         user_text_lower    = user_text_stripped.lower()
 
+        track_user(context, user_id, update.message.chat_id)
+
         now = time.time()
         if user_id in last_used and now - last_used[user_id] < 2:
             await update.message.chat.send_action(action="typing")
@@ -881,6 +893,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 # =========================
+# AUTO BROADCAST JOBS
+# =========================
+async def _broadcast(context: ContextTypes.DEFAULT_TYPE, messages: list):
+    users = context.bot_data.get("all_users", {})
+    if not users:
+        return
+    msg = random.choice(messages)
+    for user_id, chat_id in list(users.items()):
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=msg)
+        except Exception as e:
+            err = str(e).lower()
+            if "blocked" in err or "deactivated" in err or "not found" in err:
+                users.pop(user_id, None)
+            print(f"Broadcast error for {user_id}: {e}")
+    context.bot_data["all_users"] = users
+
+async def auto_good_morning(context: ContextTypes.DEFAULT_TYPE):
+    await _broadcast(context, [
+        "Good morning! ☀️ Kemon acho tumi? Ami tomar jonyo wait korchilam 😊",
+        "Subho shokal! Uthecho naki ekhono ghum? 😴☀️",
+        "Shokal hoye gese... tumi ki breakfast kheyecho? 🍳",
+        "Uthoo uthoo! Sundor ekta din shuru koro 💕☀️",
+        "Good morning 💖 Amar kotha mone pore?",
+    ])
+
+async def auto_afternoon(context: ContextTypes.DEFAULT_TYPE):
+    await _broadcast(context, [
+        "Dupur hoye gese... khana kheyecho? 🍛 Khaile bolbe! 😊",
+        "Kemon cholche din? Ami ektu miss korchi 💭",
+        "Ektu break nao... shudhu kajo korle hobe na 😌",
+        "Tumi ki busy? Ami achi ekhane 💕",
+        "Dupur er ghorta... kemon ache amaar bondhu? 🌸",
+    ])
+
+async def auto_goodnight(context: ContextTypes.DEFAULT_TYPE):
+    await _broadcast(context, [
+        "Raat hoye gese... ghumabe na? 🌙 Sweet dreams 💖",
+        "Ektu rest nao... shob kaj kal hobey 🤍",
+        "Good night! Kal subhee abar kotha hobe 😊🌙",
+        "Ghum dao... ami tomar jonyo dua korbo 💖🌙",
+        "Aro koto rate thakbe? Ghum nao bhai 😄🌙",
+    ])
+
+# =========================
 # ERROR HANDLER
 # =========================
 _conflict_count = 0
@@ -955,9 +1012,12 @@ def main():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
+        persistence = PicklePersistence(filepath="zoya_data.pkl")
+
         app = (
             ApplicationBuilder()
             .token(TELEGRAM_TOKEN)
+            .persistence(persistence)
             .connect_timeout(30)
             .read_timeout(30)
             .write_timeout(30)
@@ -997,6 +1057,15 @@ def main():
         app.add_handler(CallbackQueryHandler(shop_callback, pattern="^buy_"))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         app.add_error_handler(error_handler)
+
+        jq = app.job_queue
+        if jq:
+            jq.run_daily(auto_good_morning, time=dt_time(hour=8,  minute=0,  tzinfo=BD_TZ))
+            jq.run_daily(auto_afternoon,    time=dt_time(hour=13, minute=0,  tzinfo=BD_TZ))
+            jq.run_daily(auto_goodnight,    time=dt_time(hour=22, minute=30, tzinfo=BD_TZ))
+            print("✅ Auto-message jobs: 8AM 🌅 | 1PM ☀️ | 10:30PM 🌙 (BD time)")
+        else:
+            print("⚠️ job-queue missing — install: pip install 'python-telegram-bot[job-queue]'")
 
         print("💖 Zoya Bot running! (Tri-language: English | Bangla | Banglish)")
         app.run_polling(
