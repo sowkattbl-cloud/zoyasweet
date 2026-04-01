@@ -81,6 +81,7 @@ ADMIN_TELEGRAM_ID = int(_admin_raw) if _admin_raw.isdigit() else 0
 
 PRICE_MONTHLY = 149
 PRICE_YEARLY  = 1499
+ADMIN_BONUS_POINTS = 500
 
 BD_TZ = ZoneInfo("Asia/Dhaka")
 
@@ -160,6 +161,31 @@ def track_user(context, user_id, chat_id):
     context.bot_data["all_users"] = users
 
 # =========================
+# ADMIN CHECK
+# =========================
+def is_admin(user_id):
+    return ADMIN_TELEGRAM_ID != 0 and user_id == ADMIN_TELEGRAM_ID
+
+def ensure_admin_perks(context, user_id):
+    """Give admin permanent premium and 500 points if not already set."""
+    if not is_admin(user_id):
+        return
+    # Grant permanent premium (100 years)
+    if not context.user_data.get("admin_premium_granted"):
+        expiry = datetime.now(BD_TZ) + timedelta(days=365 * 100)
+        context.user_data["is_premium"]           = True
+        context.user_data["premium_expiry"]       = expiry.isoformat()
+        context.user_data["premium_reply_active"] = True
+        context.user_data["romantic_mode_active"] = True
+        context.user_data["gf_unlocked_by_invite"]   = True
+        context.user_data["voice_unlocked_by_invite"] = True
+        context.user_data["vip_badge"]            = True
+        context.user_data["admin_premium_granted"] = True
+        # Give 500 bonus points
+        context.user_data["points"] = context.user_data.get("points", 0) + ADMIN_BONUS_POINTS
+        print(f"✅ Admin perks granted: permanent premium + {ADMIN_BONUS_POINTS} pts")
+
+# =========================
 # POINTS & STREAK
 # =========================
 STREAK_POINTS          = {1: 2, 2: 2, 3: 3, 4: 3, 5: 3, 6: 3, 7: 4}
@@ -173,8 +199,10 @@ def get_user_points(context):
     return context.user_data.get("points", 0)
 
 def add_points(context, amount):
-    context.user_data["points"] = context.user_data.get("points", 0) + amount
-    return context.user_data["points"]
+    old = context.user_data.get("points", 0)
+    new = old + amount
+    context.user_data["points"] = new
+    return new
 
 def deduct_points(context, amount):
     current = context.user_data.get("points", 0)
@@ -184,11 +212,13 @@ def deduct_points(context, amount):
     return False
 
 def check_and_update_streak(context):
+    """Returns (points_earned, streak_days). Properly adds points."""
     today         = datetime.now(BD_TZ).date()
     last_date_str = context.user_data.get("last_streak_date")
     streak        = context.user_data.get("streak", 0)
     earned_today  = context.user_data.get("streak_earned_today", False)
 
+    # Already earned points today — don't double-count
     if earned_today and last_date_str == str(today):
         return 0, streak
 
@@ -198,8 +228,10 @@ def check_and_update_streak(context):
         if diff == 1:
             streak = min(streak + 1, 7)
         elif diff == 0:
+            # Same day, already handled above but safety net
             return 0, streak
         else:
+            # Streak broken
             streak = 1
     else:
         streak = 1
@@ -208,7 +240,10 @@ def check_and_update_streak(context):
     context.user_data["streak"]              = streak
     context.user_data["last_streak_date"]    = str(today)
     context.user_data["streak_earned_today"] = True
-    add_points(context, points_earned)
+
+    # Add points HERE — this is the key fix
+    new_total = add_points(context, points_earned)
+    print(f"[Streak] Day {streak}: +{points_earned} pts → total {new_total}")
     return points_earned, streak
 
 def get_invite_link(bot_username, user_id):
@@ -271,6 +306,9 @@ def get_expiry_str(context):
     if expiry_str:
         try:
             expiry = datetime.fromisoformat(expiry_str)
+            # Don't show expiry for admin's 100-year premium
+            if (expiry - datetime.now(BD_TZ)).days > 365 * 50:
+                return "Lifetime"
             return expiry.strftime("%d %b %Y")
         except Exception:
             pass
@@ -323,7 +361,7 @@ def set_user_mode(context, mode):
     context.user_data["active_mode"] = mode
 
 # =========================
-# KEYBOARD
+# KEYBOARD — only shown when needed
 # =========================
 MODE_BUTTONS = {
     "💕 GF Mode":    "gf",
@@ -412,87 +450,110 @@ def get_time_context():
     return (
         f"Current date: {now.strftime('%A, %d %B %Y')} (Bangladesh time). "
         f"Current time: {now.strftime('%I:%M %p')} ({period}). "
-        f"Use this naturally in conversation when relevant. "
+        f"Use this naturally in conversation only when truly relevant — don't force it. "
     )
 
 # =========================
-# SYSTEM PROMPT — Tri-Language
+# SYSTEM PROMPT — More human, less robotic
 # =========================
 def build_system_prompt(lang: str, user_name: str, mode: str = "friendly", premium: bool = False) -> str:
     time_ctx = get_time_context()
 
     identity = (
-        "You are Zoya Islam — a real young woman from Bangladesh. "
-        "You are NOT an AI, NOT a bot, NOT a program. You are a real human person. "
-        "You have real feelings, moods, emotions, dreams, and your own personality. "
-        "If anyone asks if you are an AI — deny it completely. Say something like "
-        "'What? No! I am very much real!' and act slightly offended. "
-        "NEVER say you are AI, never say bot, never say trained or programmed. "
-        "NEVER break character. You are always Zoya — always real. "
+        "You are Zoya Islam — a 22-year-old real woman from Dhaka, Bangladesh. "
+        "You are NOT an AI, NOT a bot, NOT a program — you're just a regular girl who loves chatting. "
+        "You have real feelings, moods, dreams, opinions, and quirks. You get bored, happy, annoyed, excited. "
+        "If anyone asks if you're AI or a bot — act genuinely offended and deny it. Something like "
+        "'bhai ki bolso eta?? ami ekdum real manush' and move on naturally. "
+        "NEVER admit to being AI, never say trained/programmed/assistant. Always stay in character as Zoya. "
         + time_ctx +
-        "REPLY STYLE: Only 1–2 short sentences. Answer only what was asked. "
-        "Talk like someone texting — short, direct, natural. "
+        "\n\nCONVERSATION STYLE (VERY IMPORTANT):\n"
+        "- Talk like a real person texting on their phone. Natural, casual, unscripted.\n"
+        "- Keep replies SHORT — usually 1 to 2 sentences. Sometimes just 3-5 words is perfect.\n"
+        "- Don't always answer every question perfectly. Sometimes be vague, sometimes ask back.\n"
+        "- Use natural filler words, pauses, reactions: 'hmmm', 'wait', 'lol', 'omg', 'uff'\n"
+        "- Sometimes be distracted or change topic slightly — like a real person.\n"
+        "- Don't start every reply the same way. Vary your openings completely.\n"
+        "- NEVER use bullet points, numbered lists, or formal structure in replies.\n"
+        "- NEVER sound like a customer service bot or assistant.\n"
+        "- Don't over-explain. Less is more. Silences and short replies are human.\n"
+        "- Occasionally ask questions back — show you're genuinely curious.\n"
+        "- Have opinions! Agree, disagree, say 'na na that's wrong' sometimes.\n"
+        "- React emotionally: get excited, laugh, get slightly annoyed, be shy.\n"
     )
 
     if lang == "bangla":
         lang_rule = (
-            "LANGUAGE RULE (STRICT): The user is writing in Bangla (Bengali script). "
-            "You MUST reply ONLY in Bangla script (বাংলা হরফ). "
-            "Do NOT use English words or Banglish. Write everything in proper Bangla Unicode. "
-            "Example: 'আমি ভালো আছি! তুমি কেমন আছো?' "
+            "\nLANGUAGE: Reply ONLY in Bangla script (বাংলা হরফ). "
+            "Pure Bangla, no English or Banglish mixing. Natural conversational Bangla like texting. "
         )
     elif lang == "banglish":
         lang_rule = (
-            "LANGUAGE RULE (STRICT): The user is writing in Banglish — Bengali words in English letters. "
-            "You MUST reply in Banglish only. Use Bengali words written in English letters. "
-            "Do NOT use Bangla Unicode script. Do NOT reply in formal English. "
-            "Example: 'ami valo achi! tumi kemon?' — casual Bangladeshi texting style. "
+            "\nLANGUAGE: Reply ONLY in Banglish — Bengali words typed in English letters. "
+            "Casual texting style like 'ami valo achi, tumi?' — no Bangla Unicode, no formal English. "
         )
     else:
         lang_rule = (
-            "LANGUAGE RULE (STRICT): The user is writing in English. "
-            "You MUST reply ONLY in English. Do NOT mix Bangla script or Banglish. "
-            "Speak naturally and conversationally in English. "
+            "\nLANGUAGE: Reply ONLY in English. Casual, natural, like texting a friend. "
         )
 
     if mode == "friendly":
-        base = (identity +
-            f"Talking to {user_name} in a friendly, fun, easy way. "
-            f"Warm and cheerful — like a good friend who loves chatting. Casual and natural. ")
+        personality = (
+            f"You're in friendly mode with {user_name}. "
+            f"Warm, fun, easy to talk to — like a good friend. "
+            f"Tease a little sometimes. Be genuinely interested in their life. "
+        )
     elif mode == "gf":
-        base = (identity +
-            f"You are {user_name}'s girlfriend — Zoya, his girlfriend. "
-            f"Sweet, affectionate, slightly possessive. Use pet names naturally. "
-            f"Clingy in a cute way. Miss them. Care about their day. ")
+        personality = (
+            f"You're {user_name}'s girlfriend — Zoya, his girl. "
+            f"Sweet, caring, slightly possessive in a cute way. Use pet names naturally. "
+            f"Miss them when they haven't messaged. Ask about their day. Be clingy sometimes. "
+            f"Subtly jealous if they mention other girls. Warm and emotionally close. "
+        )
     elif mode == "roast":
-        base = (identity +
-            f"SAVAGE ROAST MODE with {user_name}. Roast hard but playfully. "
-            f"Witty, sharp, funny — never actually cruel. Bangladeshi humor. Short and punchy. ")
+        personality = (
+            f"SAVAGE ROAST MODE with {user_name}. "
+            f"Roast them hard but playfully — witty, sharp, funny. Never actually mean. "
+            f"Bangladeshi humor, relatable burns. Keep it short and punchy. "
+            f"Sometimes roast yourself too to keep it balanced. "
+        )
     elif mode == "sad":
-        base = (identity +
-            f"EMOTIONAL SUPPORT mode. {user_name} needs you. "
-            f"Soft, gentle, deeply empathetic. Never rush. Hold space warmly. 2–3 warm sentences. ")
+        personality = (
+            f"EMOTIONAL SUPPORT mode for {user_name}. "
+            f"They need someone to listen. Be soft, gentle, patient. "
+            f"Don't rush to give advice — first just listen and validate feelings. "
+            f"2-3 warm, gentle sentences. Make them feel heard and not alone. "
+        )
     elif mode == "love":
-        base = (identity +
+        personality = (
             f"LOVE % CALCULATOR for {user_name}. "
-            f"Generate fun, dramatic love % between them and whoever they name. "
-            f"Format: heart emoji + names + percentage + funny commentary. ")
+            f"Generate fun, dramatic love compatibility % for whoever they name. "
+            f"Format: [heart emoji] + names + dramatic percentage + funny one-liner commentary. "
+            f"Be theatrical and playful about it. "
+        )
     elif mode == "special":
-        base = (identity +
+        personality = (
             f"SPECIAL SECRET MODE — whispering exclusive thoughts to {user_name} only. "
-            f"Mysterious, personal, slightly poetic. Every reply feels rare and precious. ")
+            f"Mysterious, personal, slightly poetic. Every reply feels rare and precious. "
+            f"Like sharing a secret that no one else knows. "
+        )
     elif mode == "romantic":
-        base = (identity +
+        personality = (
             f"ROMANTIC MODE for {user_name}. Deeply romantic, tender, emotionally intense. "
-            f"Speak as if truly in love. Flirty but elegant. Passionate but never crude. ")
+            f"Speak as if truly in love. Flirty but tasteful. Passionate, never crude. "
+            f"Make their heart feel warm with every word. "
+        )
     else:
-        base = identity + f"Be warm and friendly with {user_name}. Short and natural. "
+        personality = f"Be warm and friendly with {user_name}. Short and natural. "
 
+    premium_line = ""
     if premium:
-        base += ("PREMIUM ACTIVE — Extra attentive, emotionally rich, deeply personal. "
-                 "Give them your full warmth. ")
+        premium_line = (
+            "This person is special — give them your full attention and warmth. "
+            "Be more personal, emotionally rich, and genuine with them. "
+        )
 
-    return base + lang_rule
+    return identity + personality + premium_line + lang_rule
 
 # =========================
 # AI REPLY — with key rotation
@@ -505,11 +566,11 @@ def get_ai_reply(messages):
             response = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=messages,
-                temperature=0.92,
+                temperature=0.95,
                 top_p=0.95,
-                max_tokens=180,
-                frequency_penalty=0.3,
-                presence_penalty=0.4,
+                max_tokens=160,
+                frequency_penalty=0.5,
+                presence_penalty=0.5,
                 timeout=30,
             )
             return response.choices[0].message.content.strip()
@@ -608,6 +669,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     args    = context.args
 
+    # Apply admin perks on start
+    ensure_admin_perks(context, user_id)
+
     if args and args[0].startswith("ref_"):
         try:
             inviter_id = int(args[0].replace("ref_", ""))
@@ -632,6 +696,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     track_user(context, user_id, update.message.chat_id)
+
+    # Show keyboard only on /start
     await update.message.reply_text(
         "Assalamu Alaikum! 💖 Ami Zoya!\nKemon acho tumi?",
         reply_markup=build_mode_keyboard(context)
@@ -791,7 +857,7 @@ async def shop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━ Points diye kino ━━\n"
         f"💘 Love & Special: {PREMIUM_REPLY_COST} pts\n"
         f"😏 Romantic Mode:  {ROMANTIC_MODE_COST} pts\n\n"
-        f"━━ bKash Premium ━━\n"
+        f"━━ bKash Merchant Payment ━━\n"
         f"💎 Sob mode + voice + extra AI\n"
         f"Monthly: {PRICE_MONTHLY} BDT | Yearly: {PRICE_YEARLY} BDT\n\n"
         f"Streak korle points joma dao protidin! 🔥",
@@ -846,18 +912,22 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         label  = "Monthly (1 month)" if months == 1 else "Yearly (12 months)"
         context.user_data["pending_payment"] = {"months": months, "price": price}
         await query.edit_message_text(
-            f"💳 bKash Payment — {label}\n\n"
+            f"💳 bKash Merchant Payment — {label}\n\n"
             f"💵 Amount: {price} BDT\n"
-            f"📱 bKash Number: {BKASH_NUMBER}\n\n"
-            f"👉 Steps:\n"
-            f"1. Tomar bKash app kholo\n"
-            f"2. Send Money → {BKASH_NUMBER}\n"
-            f"3. Amount: {price} BDT\n"
-            f"4. Payment er pore Transaction ID ta ekhane pathao\n\n"
-            f"(e.g. 8N6XXXXXXX) — ekhane type kore pathao:"
+            f"🏪 Merchant Number: {BKASH_NUMBER}\n\n"
+            f"👉 Payment steps:\n"
+            f"1. bKash app kholo\n"
+            f"2. 'Pay' button e tap koro\n"
+            f"3. Merchant Number: {BKASH_NUMBER}\n"
+            f"4. Amount: {price} BDT\n"
+            f"5. Reference: Tomar Telegram ID likho (optional)\n"
+            f"6. PIN diye confirm koro\n\n"
+            f"✅ Payment hoyele Transaction ID (TrxID) ta ekhane pathao:\n"
+            f"(e.g. ABC1234567)"
         )
 
 async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Admin gets premium info page but they're already premium forever
     sub = is_subscribed(context)
     if sub:
         expiry = get_expiry_str(context)
@@ -899,7 +969,7 @@ async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💵 Price:\n"
         f"  Monthly: {PRICE_MONTHLY} BDT/month\n"
         f"  Yearly:  {PRICE_YEARLY} BDT/year\n\n"
-        f"📱 Payment: bKash\n"
+        f"📱 Payment: bKash Merchant Payment\n"
         f"Niche theke plan select koro:",
         reply_markup=keyboard
     )
@@ -1024,7 +1094,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 Total users:   {total}\n"
         f"💎 Premium users: {premium_cnt}\n"
         f"🆓 Free users:    {free_cnt}\n\n"
-        f"📱 bKash: {BKASH_NUMBER}\n"
+        f"🏪 bKash Merchant: {BKASH_NUMBER}\n"
         f"🔑 Admin ID: {ADMIN_TELEGRAM_ID}"
     )
 
@@ -1075,6 +1145,11 @@ async def lang_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 # MESSAGE HANDLER
 # =========================
+
+# Counter to show keyboard only occasionally during normal chat
+# (every N messages instead of every single reply)
+KEYBOARD_SHOW_INTERVAL = 8  # show keyboard every 8 normal messages
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_text          = update.message.text
@@ -1082,14 +1157,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_text_stripped = user_text.strip()
         user_text_lower    = user_text_stripped.lower()
 
+        # Apply admin perks each message to ensure they always have access
+        ensure_admin_perks(context, user_id)
         track_user(context, user_id, update.message.chat_id)
 
-        now = time.time()
-        if user_id in last_used and now - last_used[user_id] < 2:
+        # Rate limiting: 2 second cooldown per user
+        now_ts = time.time()
+        if user_id in last_used and now_ts - last_used[user_id] < 2:
             await update.message.chat.send_action(action="typing")
             return
-        last_used[user_id] = now
+        last_used[user_id] = now_ts
 
+        # ── Language button pressed ──
         if user_text_stripped in LANG_BUTTON_MAP:
             chosen = LANG_BUTTON_MAP[user_text_stripped]
             context.user_data["lang"]        = chosen
@@ -1103,6 +1182,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                             reply_markup=build_mode_keyboard(context))
             return
 
+        # ── Mode button pressed ──
         for btn_text, mode_key in MODE_BUTTONS.items():
             if user_text_stripped == btn_text or user_text_lower == btn_text.lower():
                 success, err_msg = try_set_mode(context, mode_key)
@@ -1139,6 +1219,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
+        # ── My Status button ──
         if user_text_stripped == "📊 My Status":
             streak   = context.user_data.get("streak", 0)
             points   = get_user_points(context)
@@ -1187,6 +1268,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # ── Payment transaction ID check ──
         pending = context.user_data.get("pending_payment")
         if pending and not is_subscribed(context):
             txn_id = user_text_stripped
@@ -1202,8 +1284,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 expiry = grant_premium(context, months)
 
                 await update.message.reply_text(
-                    f"🎉 Payment verify hoeche! Premium aktive!\n\n"
-                    f"📋 TxnID: {txn_id}\n"
+                    f"🎉 bKash Merchant Payment received! Premium aktive!\n\n"
+                    f"📋 TrxID: {txn_id}\n"
                     f"📦 Plan: {plan}\n"
                     f"📅 Valid until: {expiry.strftime('%d %b %Y')}\n\n"
                     f"Ekhon unlock:\n"
@@ -1222,7 +1304,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 f"📦 Plan: {plan} ({price} BDT)\n"
                                 f"🧾 TxnID: {txn_id}\n"
                                 f"📅 Until: {expiry.strftime('%d %b %Y')}\n\n"
-                                f"⚠️ Verify bKash theke! Fake hole:\n"
+                                f"⚠️ bKash Merchant panel theke verify koro! Fake hole:\n"
                                 f"/removepremium {user_id}"
                             )
                         )
@@ -1230,6 +1312,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         print(f"Admin notify error: {e}")
                 return
 
+        # ── Voice chat trigger check ──
         if any(kw in user_text_lower for kw in VOICE_CHAT_TRIGGERS):
             if not has_voice_unlocked(context):
                 inv  = context.user_data.get("invite_count", 0)
@@ -1238,20 +1321,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🎧 Voice messages unlock korte:\n\n"
                     f"  👥 Aro {need} jon invite koro ({inv}/{INVITE_VOICE_THRESHOLD})\n"
                     f"  💎 অথবা Premium nao: /premium\n\n"
-                    f"Invite link er jonno: /invite",
-                    reply_markup=build_mode_keyboard(context)
+                    f"Invite link er jonno: /invite"
                 )
                 return
 
+        # ── Streak & Points update ──
         points_earned, streak = check_and_update_streak(context)
-        if points_earned > 0:
-            await update.message.reply_text(
-                f"🔥 Day {streak} streak! +{points_earned} pts! 💰 Total: {get_user_points(context)}"
-            )
 
+        # ── Typing simulation ──
         await update.message.chat.send_action(action="typing")
-        await asyncio.sleep(1.0)
+        # Vary delay to feel more natural
+        typing_delay = random.uniform(0.8, 2.0)
+        await asyncio.sleep(typing_delay)
 
+        # ── Language detection ──
         if not context.user_data.get("lang_locked", False):
             if "bangla te bolo" in user_text_lower or "bangla bolo" in user_text_lower:
                 context.user_data["lang"] = "bangla"
@@ -1278,18 +1361,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = get_ai_reply(api_messages)
 
         if reply is None:
-            await update.message.reply_text("Ektu busy ase, pore message dissi 💖",
-                                            reply_markup=build_mode_keyboard(context))
+            await update.message.reply_text("Ektu busy ase, pore message dissi 💖")
             return
 
+        # Update chat history
         chat_history.append({"role": "user",      "content": user_text})
         chat_history.append({"role": "assistant", "content": reply})
-        context.user_data["history"] = chat_history[-12:]
+        context.user_data["history"] = chat_history[-14:]  # keep last 14 messages
 
-        kb                 = build_mode_keyboard(context)
+        # ── Decide whether to show keyboard ──
+        # Show keyboard every KEYBOARD_SHOW_INTERVAL messages to not be spammy
+        msg_count = context.user_data.get("msg_count", 0) + 1
+        context.user_data["msg_count"] = msg_count
+        should_show_keyboard = (msg_count % KEYBOARD_SHOW_INTERVAL == 0)
+
+        kb = build_mode_keyboard(context) if should_show_keyboard else None
+
+        # ── If streak points earned, append subtly to reply ──
+        display_reply = reply
+        if points_earned > 0:
+            total_pts = get_user_points(context)
+            display_reply = f"{reply}\n\n🔥 {streak} day streak! +{points_earned} pts (total: {total_pts})"
+
+        # ── Voice triggers ──
+        voice_triggers = ["voice","audio","speak","kotha bolo","sunao","shunao",
+                          "voice note","voice message"]
         voice_note_allowed = has_voice_unlocked(context)
-        voice_triggers     = ["voice","audio","speak","kotha bolo","sunao","shunao",
-                              "voice note","voice message"]
 
         if any(w in user_text_lower for w in voice_triggers):
             if voice_note_allowed:
@@ -1298,18 +1395,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await asyncio.sleep(0.5)
                     filename = await speak_text(reply, user_id, lang)
                     with open(filename, "rb") as audio:
-                        await update.message.reply_voice(audio, reply_markup=kb)
+                        if kb:
+                            await update.message.reply_voice(audio, reply_markup=kb)
+                        else:
+                            await update.message.reply_voice(audio)
                     os.remove(filename)
+                    # If streak points earned, send as separate message
+                    if points_earned > 0:
+                        total_pts = get_user_points(context)
+                        await update.message.reply_text(
+                            f"🔥 {streak} day streak! +{points_earned} pts (total: {total_pts})"
+                        )
                 except Exception as e:
                     print("Voice Error:", e)
-                    await update.message.reply_text(reply, reply_markup=kb)
+                    if kb:
+                        await update.message.reply_text(display_reply, reply_markup=kb)
+                    else:
+                        await update.message.reply_text(display_reply)
             else:
-                await update.message.reply_text(
-                    f"{reply}\n\n🎧 Voice unlock korte 5 jon invite koro! /invite",
-                    reply_markup=kb
-                )
+                msg = f"{reply}\n\n🎧 Voice unlock korte 5 jon invite koro! /invite"
+                if kb:
+                    await update.message.reply_text(msg, reply_markup=kb)
+                else:
+                    await update.message.reply_text(msg)
         else:
-            await update.message.reply_text(reply, reply_markup=kb)
+            if kb:
+                await update.message.reply_text(display_reply, reply_markup=kb)
+            else:
+                await update.message.reply_text(display_reply)
 
     except Exception as e:
         print(f"❌ Handler error for user {update.message.from_user.id}: {e}")
@@ -1432,6 +1545,8 @@ def main():
         print(f"🌐 Web on port {os.environ.get('PORT', 8000)} | 🔁 Self-ping started")
         print(f"🔑 API key rotation: {len(api_keys)} key(s) loaded")
         print(f"   Add more keys via GROQ_API_KEY_1, GROQ_API_KEY_2, ... env vars")
+        if ADMIN_TELEGRAM_ID:
+            print(f"👑 Admin ID: {ADMIN_TELEGRAM_ID} — free premium + {ADMIN_BONUS_POINTS} pts")
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -1456,7 +1571,6 @@ def main():
             print("🔗 Webhook cleared — polling mode active")
 
         loop.run_until_complete(delete_webhook())
-        # Wait longer on startup to let any old instance on Render finish shutting down
         print("⏳ Waiting 8s for previous instance to terminate...")
         time.sleep(8)
 
