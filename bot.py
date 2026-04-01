@@ -1377,9 +1377,7 @@ async def error_handler(update, context: ContextTypes.DEFAULT_TYPE):
         _conflict_count += 1
         print(f"⚠️  Conflict detected (#{_conflict_count}) — another instance is running.")
         if _conflict_count >= 3:
-            print("🛑 Too many conflicts — shutting down this instance to let the other take over.")
-            if _bot_app is not None:
-                await _bot_app.stop()
+            print("🛑 Too many conflicts — exiting so the newer instance can take over.")
             release_instance_lock()
             os._exit(0)
         await asyncio.sleep(5)
