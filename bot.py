@@ -883,15 +883,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 # ERROR HANDLER
 # =========================
+_conflict_count = 0
+_bot_app = None
+
 async def error_handler(update, context: ContextTypes.DEFAULT_TYPE):
-    err = str(context.error).lower()
-    if "conflict" in err:
-        print("⚠️  Conflict detected — this instance will keep running. "
-              "Stop any other instances to resolve.")
-    elif "terminated by other getupdates" in str(context.error).lower():
-        print("⚠️  Another instance took over polling. Restarting in 10s...")
-        await asyncio.sleep(10)
+    global _conflict_count
+    err_str = str(context.error).lower()
+
+    if "conflict" in err_str or "terminated by other getupdates" in err_str:
+        _conflict_count += 1
+        print(f"⚠️  Conflict detected (#{_conflict_count}) — another instance is running.")
+        if _conflict_count >= 3:
+            print("🛑 Too many conflicts — shutting down this instance to let the other take over.")
+            if _bot_app is not None:
+                await _bot_app.stop()
+            release_instance_lock()
+            os._exit(0)
+        await asyncio.sleep(5)
     else:
+        _conflict_count = 0
         print(f"❌ Bot error: {context.error}")
 
 # =========================
@@ -925,6 +935,8 @@ def self_ping():
 # MAIN
 # =========================
 def main():
+    global _bot_app
+
     if not acquire_instance_lock():
         sys.exit(1)
 
@@ -953,12 +965,16 @@ def main():
             .build()
         )
 
+        _bot_app = app
+
         async def delete_webhook():
             await app.bot.delete_webhook(drop_pending_updates=True)
             print("🔗 Webhook cleared — polling mode active")
 
         loop.run_until_complete(delete_webhook())
-        time.sleep(3)
+        # Wait longer on startup to let any old instance on Render finish shutting down
+        print("⏳ Waiting 8s for previous instance to terminate...")
+        time.sleep(8)
 
         app.add_handler(CommandHandler("start",    start))
         app.add_handler(CommandHandler("setname",  setname))
