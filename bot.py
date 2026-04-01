@@ -73,8 +73,14 @@ signal.signal(signal.SIGINT, handle_signal)
 # =========================
 # CONFIG
 # =========================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip().strip('"').strip("'")
-RENDER_URL     = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_TOKEN",    "").strip().strip('"').strip("'")
+RENDER_URL        = os.environ.get("RENDER_EXTERNAL_URL","").strip()
+BKASH_NUMBER      = os.environ.get("BKASH_NUMBER",       "01XXXXXXXXX").strip()
+_admin_raw        = os.environ.get("ADMIN_TELEGRAM_ID",  "0").strip()
+ADMIN_TELEGRAM_ID = int(_admin_raw) if _admin_raw.isdigit() else 0
+
+PRICE_MONTHLY = 149
+PRICE_YEARLY  = 1499
 
 BD_TZ = ZoneInfo("Asia/Dhaka")
 
@@ -156,12 +162,12 @@ def track_user(context, user_id, chat_id):
 # =========================
 # POINTS & STREAK
 # =========================
-STREAK_POINTS             = {1: 2, 2: 2, 3: 3, 4: 3, 5: 3, 6: 3, 7: 4}
-PREMIUM_REPLY_COST        = 60
-ROMANTIC_MODE_COST        = 99
-INVITE_ROMANTIC_THRESHOLD = 3
-INVITE_VOICE_THRESHOLD    = 5
-INVITE_VIP_THRESHOLD      = 10
+STREAK_POINTS          = {1: 2, 2: 2, 3: 3, 4: 3, 5: 3, 6: 3, 7: 4}
+PREMIUM_REPLY_COST     = 60
+ROMANTIC_MODE_COST     = 99
+INVITE_GF_THRESHOLD    = 3
+INVITE_VOICE_THRESHOLD = 5
+INVITE_VIP_THRESHOLD   = 10
 
 def get_user_points(context):
     return context.user_data.get("points", 0)
@@ -212,36 +218,93 @@ def process_referral(context_inviter, inviter_id):
     invite_count = context_inviter.get("invite_count", 0) + 1
     context_inviter["invite_count"] = invite_count
     newly_unlocked = []
-    if invite_count == INVITE_ROMANTIC_THRESHOLD and not context_inviter.get("romantic_unlocked_by_invite"):
-        context_inviter["romantic_unlocked_by_invite"] = True
-        newly_unlocked.append("romantic_mode")
-    if invite_count == INVITE_VOICE_THRESHOLD and not context_inviter.get("voice_unlocked_by_invite"):
+    if invite_count >= INVITE_GF_THRESHOLD and not context_inviter.get("gf_unlocked_by_invite"):
+        context_inviter["gf_unlocked_by_invite"] = True
+        newly_unlocked.append("gf_mode")
+    if invite_count >= INVITE_VOICE_THRESHOLD and not context_inviter.get("voice_unlocked_by_invite"):
         context_inviter["voice_unlocked_by_invite"] = True
         newly_unlocked.append("voice_message")
-    if invite_count == INVITE_VIP_THRESHOLD and not context_inviter.get("vip_badge"):
+    if invite_count >= INVITE_VIP_THRESHOLD and not context_inviter.get("vip_badge"):
         context_inviter["vip_badge"] = True
         newly_unlocked.append("vip_badge")
     return invite_count, newly_unlocked
 
+def has_gf_access(context):
+    inv = context.user_data.get("invite_count", 0)
+    return (inv >= INVITE_GF_THRESHOLD
+            or context.user_data.get("gf_unlocked_by_invite", False)
+            or is_subscribed(context))
+
 def has_premium_reply(context):
-    return context.user_data.get("premium_reply_active", False)
+    return (context.user_data.get("premium_reply_active", False)
+            or is_subscribed(context))
 
 def has_romantic_mode(context):
     return (context.user_data.get("romantic_mode_active", False)
-            or context.user_data.get("romantic_unlocked_by_invite", False))
+            or is_subscribed(context))
 
 def has_voice_unlocked(context):
-    return context.user_data.get("voice_unlocked_by_invite", False)
+    inv = context.user_data.get("invite_count", 0)
+    return (inv >= INVITE_VOICE_THRESHOLD
+            or context.user_data.get("voice_unlocked_by_invite", False)
+            or is_subscribed(context))
 
 def has_vip_badge(context):
     return context.user_data.get("vip_badge", False)
 
+def is_subscribed(context):
+    expiry_str = context.user_data.get("premium_expiry")
+    if expiry_str:
+        try:
+            expiry = datetime.fromisoformat(expiry_str)
+            if datetime.now(BD_TZ) < expiry:
+                return True
+            context.user_data.pop("premium_expiry", None)
+            context.user_data["is_premium"] = False
+        except Exception:
+            pass
+    return (context.user_data.get("is_premium", False)
+            or context.user_data.get("premium_reply_active", False))
+
+def get_expiry_str(context):
+    expiry_str = context.user_data.get("premium_expiry")
+    if expiry_str:
+        try:
+            expiry = datetime.fromisoformat(expiry_str)
+            return expiry.strftime("%d %b %Y")
+        except Exception:
+            pass
+    return None
+
+def grant_premium(context, months=1):
+    existing_str = context.user_data.get("premium_expiry")
+    if existing_str:
+        try:
+            existing = datetime.fromisoformat(existing_str)
+            base = max(existing, datetime.now(BD_TZ))
+        except Exception:
+            base = datetime.now(BD_TZ)
+    else:
+        base = datetime.now(BD_TZ)
+    expiry = base + timedelta(days=30 * months)
+    context.user_data["is_premium"]          = True
+    context.user_data["premium_expiry"]      = expiry.isoformat()
+    context.user_data["premium_reply_active"] = True
+    context.user_data["romantic_mode_active"] = True
+    return expiry
+
+def revoke_premium(context):
+    context.user_data["is_premium"]          = False
+    context.user_data["premium_reply_active"] = False
+    context.user_data["romantic_mode_active"] = False
+    context.user_data.pop("premium_expiry", None)
+
 # =========================
 # MODE SYSTEM
 # =========================
-FREE_MODES    = {"friendly", "gf", "roast", "sad"}
-PREMIUM_MODES = {"love", "special"}
-INVITE_MODES  = {"romantic"}
+FREE_MODES    = {"friendly", "roast", "sad"}
+INVITE_MODES  = {"gf"}
+PREMIUM_MODES = {"love", "special", "romantic"}
 
 MODE_LABELS = {
     "friendly": "😊 Friendly",
@@ -263,26 +326,31 @@ def set_user_mode(context, mode):
 # KEYBOARD
 # =========================
 MODE_BUTTONS = {
-    "💕 GF Mode":  "gf",
-    "🔥 Roast":    "roast",
-    "🫂 Sad":      "sad",
-    "😊 Friendly": "friendly",
-    "💘 Love %":   "love",
-    "✨ Special":  "special",
-    "😏 Romantic": "romantic",
+    "💕 GF Mode":    "gf",
+    "💕 GF Mode 🔒": "gf",
+    "💕 GF Mode ✅": "gf",
+    "🔥 Roast":      "roast",
+    "🫂 Sad":        "sad",
+    "😊 Friendly":   "friendly",
+    "💘 Love %":     "love",
+    "✨ Special":    "special",
+    "😏 Romantic":   "romantic",
 }
 
 def build_mode_keyboard(context):
-    premium  = has_premium_reply(context)
-    romantic = has_romantic_mode(context)
-    love_btn     = "💘 Love % ✅"   if premium  else "💘 Love % 🔒"
-    special_btn  = "✨ Special ✅"   if premium  else "✨ Special 🔒"
-    romantic_btn = "😏 Romantic ✅" if romantic else "😏 Romantic 🔒"
+    gf_ok       = has_gf_access(context)
+    pr_ok       = has_premium_reply(context)
+    rm_ok       = has_romantic_mode(context)
+    gf_btn       = "💕 GF Mode ✅"  if gf_ok else "💕 GF Mode 🔒"
+    love_btn     = "💘 Love % ✅"   if pr_ok else "💘 Love % 🔒"
+    special_btn  = "✨ Special ✅"   if pr_ok else "✨ Special 🔒"
+    romantic_btn = "😏 Romantic ✅" if rm_ok else "😏 Romantic 🔒"
     keyboard = [
-        [KeyboardButton("💕 GF Mode"),  KeyboardButton("🔥 Roast"),     KeyboardButton("🫂 Sad")],
-        [KeyboardButton(love_btn),       KeyboardButton(special_btn),    KeyboardButton(romantic_btn)],
-        [KeyboardButton("😊 Friendly"), KeyboardButton("📊 My Status"), KeyboardButton("🎁 Invite")],
-        [KeyboardButton("🇧🇩 Bangla"),  KeyboardButton("🔤 Banglish"),  KeyboardButton("🇬🇧 English")],
+        [KeyboardButton(gf_btn),         KeyboardButton("🔥 Roast"),     KeyboardButton("🫂 Sad")],
+        [KeyboardButton(love_btn),        KeyboardButton(special_btn),    KeyboardButton(romantic_btn)],
+        [KeyboardButton("😊 Friendly"),  KeyboardButton("📊 My Status"), KeyboardButton("🎁 Invite")],
+        [KeyboardButton("💎 Premium"),   KeyboardButton("🇧🇩 Bangla"),   KeyboardButton("🔤 Banglish")],
+        [KeyboardButton("🇬🇧 English")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
@@ -490,23 +558,47 @@ def try_set_mode(context, mode):
     if mode in FREE_MODES:
         set_user_mode(context, mode)
         return True, None
-    elif mode in INVITE_MODES:
-        if has_romantic_mode(context):
+
+    elif mode == "gf":
+        if has_gf_access(context):
             set_user_mode(context, mode)
             return True, None
         inv  = context.user_data.get("invite_count", 0)
-        need = INVITE_ROMANTIC_THRESHOLD - inv
-        return False, (f"😏 Romantic mode ta locked!\n\n"
-                       f"👥 Tumi {inv} jon invite korecho.\n"
-                       f"Aro {need} jon invite kore unlock koro! /invite")
-    elif mode in PREMIUM_MODES:
+        need = INVITE_GF_THRESHOLD - inv
+        return False, (
+            f"💕 GF Mode locked!\n\n"
+            f"Unlock korbey:\n"
+            f"  👥 {need} jon aro invite koro (ekhon {inv}/{INVITE_GF_THRESHOLD})\n"
+            f"  💎 অথবা Premium nao: /premium\n\n"
+            f"Invite link: /invite"
+        )
+
+    elif mode in ("love", "special"):
         if has_premium_reply(context):
             set_user_mode(context, mode)
             return True, None
-        pts = get_user_points(context)
-        return False, (f"✨ Ei mode premium!\n\n"
-                       f"💰 Tomar points: {pts} | Darkar: {PREMIUM_REPLY_COST}\n"
-                       f"/shop theke unlock koro")
+        pts  = get_user_points(context)
+        need = PREMIUM_REPLY_COST - pts
+        return False, (
+            f"✨ Ei mode unlock korte:\n\n"
+            f"  💰 Points: {pts}/{PREMIUM_REPLY_COST} (aro {need} pts darkar)\n"
+            f"  🛒 /shop theke buy koro\n"
+            f"  💎 অথবা Premium nao: /premium"
+        )
+
+    elif mode == "romantic":
+        if has_romantic_mode(context):
+            set_user_mode(context, mode)
+            return True, None
+        pts  = get_user_points(context)
+        need = ROMANTIC_MODE_COST - pts
+        return False, (
+            f"😏 Romantic Mode unlock korte:\n\n"
+            f"  💰 Points: {pts}/{ROMANTIC_MODE_COST} (aro {need} pts darkar)\n"
+            f"  🛒 /shop theke buy koro\n"
+            f"  💎 অথবা Premium nao: /premium"
+        )
+
     return False, "Unknown mode."
 
 # =========================
@@ -521,13 +613,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             inviter_id = int(args[0].replace("ref_", ""))
             if inviter_id != user_id and not context.bot_data.get(f"referred_{user_id}"):
                 context.bot_data[f"referred_{user_id}"] = True
-                inviter_data = context.bot_data.get(f"user_{inviter_id}", {})
-                invite_count, newly_unlocked = process_referral(inviter_data, inviter_id)
-                context.bot_data[f"user_{inviter_id}"] = inviter_data
+                inviter_ud   = context.application.user_data[inviter_id]
+                invite_count, newly_unlocked = process_referral(inviter_ud, inviter_id)
                 reward_msgs = {
-                    "romantic_mode": "🎉 3 jon invite! Romantic mode unlock! 😏💕",
-                    "voice_message": "🎧 5 jon invite! Voice message unlock!",
-                    "vip_badge":     "👑 10 jon invite! VIP badge! Tumi legend!",
+                    "gf_mode":       f"🎉 {INVITE_GF_THRESHOLD} jon invite! 💕 GF Mode unlock hoeche!",
+                    "voice_message": f"🎧 {INVITE_VOICE_THRESHOLD} jon invite! Voice unlock hoeche! 🎤",
+                    "vip_badge":     f"👑 {INVITE_VIP_THRESHOLD} jon invite! VIP badge peyecho! Tumi legend! 🏆",
                 }
                 for unlock in newly_unlocked:
                     try:
@@ -577,8 +668,11 @@ async def setname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         reply_markup=build_mode_keyboard(context))
 
 async def mode_gf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    set_user_mode(context, "gf")
-    await update.message.reply_text("💕 Girlfriend mode on!", reply_markup=build_mode_keyboard(context))
+    success, err_msg = try_set_mode(context, "gf")
+    await update.message.reply_text(
+        "💕 Girlfriend mode on! 😊" if success else err_msg,
+        reply_markup=build_mode_keyboard(context)
+    )
 
 async def mode_roast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_user_mode(context, "roast")
@@ -614,12 +708,27 @@ async def mode_romantic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def modes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sub  = is_subscribed(context)
+    inv  = context.user_data.get("invite_count", 0)
+    gf   = "✅" if has_gf_access(context) else f"🔒 ({inv}/{INVITE_GF_THRESHOLD} invites)"
+    vc   = "✅" if has_voice_unlocked(context) else f"🔒 ({inv}/{INVITE_VOICE_THRESHOLD} invites)"
+    pr   = "✅" if has_premium_reply(context) else f"🔒 ({PREMIUM_REPLY_COST} pts)"
+    rm   = "✅" if has_romantic_mode(context) else f"🔒 ({ROMANTIC_MODE_COST} pts)"
+    prem = "💎 AKTIVE" if sub else "❌ not aktive"
     await update.message.reply_text(
-        "🎭 Available Modes:\n\n"
-        "Free: /gf /roast /sad /friendly\n"
-        "Premium (60pts): /love /special\n"
-        "Invite (3 friends): /romantic\n\n"
-        "Current: " + MODE_LABELS.get(get_user_mode(context), get_user_mode(context)),
+        f"🎭 Zoya Mode System\n\n"
+        f"🆓 Always free:\n"
+        f"  😊 Friendly | 🔥 Roast | 🫂 Sad\n\n"
+        f"👥 Invite unlock:\n"
+        f"  💕 GF Mode  {gf}\n"
+        f"  🎧 Voice    {vc}\n\n"
+        f"💰 Points unlock:\n"
+        f"  💘 Love & ✨ Special  {pr}\n"
+        f"  😏 Romantic           {rm}\n\n"
+        f"💎 Premium (all unlock):\n"
+        f"  {prem}\n\n"
+        f"Current: {MODE_LABELS.get(get_user_mode(context), get_user_mode(context))}\n"
+        f"/shop | /invite | /premium",
         reply_markup=build_mode_keyboard(context)
     )
 
@@ -637,24 +746,55 @@ async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_username = (await context.bot.get_me()).username
     link         = get_invite_link(bot_username, user_id)
     inv          = context.user_data.get("invite_count", 0)
+    gf_done  = "✅" if inv >= INVITE_GF_THRESHOLD    else f"({inv}/{INVITE_GF_THRESHOLD})"
+    vc_done  = "✅" if inv >= INVITE_VOICE_THRESHOLD  else f"({inv}/{INVITE_VOICE_THRESHOLD})"
+    vip_done = "✅" if inv >= INVITE_VIP_THRESHOLD    else f"({inv}/{INVITE_VIP_THRESHOLD})"
     await update.message.reply_text(
         f"🎁 Tomar invite link:\n{link}\n\n"
         f"Invited: {inv} jon\n\n"
-        f"3 jon → 😏 Romantic mode\n"
-        f"5 jon → 🎧 Voice messages\n"
-        f"10 jon → 👑 VIP badge",
+        f"💕 {INVITE_GF_THRESHOLD} jon → GF Mode unlock {gf_done}\n"
+        f"🎧 {INVITE_VOICE_THRESHOLD} jon → Voice Messages {vc_done}\n"
+        f"👑 {INVITE_VIP_THRESHOLD} jon → VIP Badge {vip_done}\n\n"
+        f"Ekhon share koro! Joto beshi invite, toto reward! 🚀",
         reply_markup=build_mode_keyboard(context)
     )
 
 async def shop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    points = get_user_points(context)
+    points   = get_user_points(context)
+    pr_ok    = has_premium_reply(context)
+    rm_ok    = has_romantic_mode(context)
+    sub      = is_subscribed(context)
+    expiry   = get_expiry_str(context)
+    sub_line = (f"💎 Premium aktive! (until {expiry})" if expiry else "💎 Premium aktive!") if sub else "💎 Premium: not aktive"
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"💘 Premium Reply (60pts)", callback_data="buy_premium")],
-        [InlineKeyboardButton(f"😏 Romantic Mode (99pts)", callback_data="buy_romantic")],
+        [InlineKeyboardButton(
+            f"{'✅' if pr_ok else '🔒'} Love & Special Mode ({PREMIUM_REPLY_COST} pts)",
+            callback_data="buy_premium"
+        )],
+        [InlineKeyboardButton(
+            f"{'✅' if rm_ok else '🔒'} Romantic Mode ({ROMANTIC_MODE_COST} pts)",
+            callback_data="buy_romantic"
+        )],
+        [InlineKeyboardButton(
+            f"💳 Premium Monthly — {PRICE_MONTHLY} BDT",
+            callback_data="buy_monthly"
+        )],
+        [InlineKeyboardButton(
+            f"💳 Premium Yearly  — {PRICE_YEARLY} BDT (best!)",
+            callback_data="buy_yearly"
+        )],
     ])
     await update.message.reply_text(
-        f"🛒 Zoya's Shop\n\n💰 Tomar points: {points}\n\n"
-        f"Streak diye points joma dao protidin! 🔥",
+        f"🛒 Zoya Shop\n\n"
+        f"💰 Tomar points: {points}\n"
+        f"{sub_line}\n\n"
+        f"━━ Points diye kino ━━\n"
+        f"💘 Love & Special: {PREMIUM_REPLY_COST} pts\n"
+        f"😏 Romantic Mode:  {ROMANTIC_MODE_COST} pts\n\n"
+        f"━━ bKash Premium ━━\n"
+        f"💎 Sob mode + voice + extra AI\n"
+        f"Monthly: {PRICE_MONTHLY} BDT | Yearly: {PRICE_YEARLY} BDT\n\n"
+        f"Streak korle points joma dao protidin! 🔥",
         reply_markup=keyboard
     )
 
@@ -665,27 +805,248 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     points = get_user_points(context)
 
     if data == "buy_premium":
+        if has_premium_reply(context):
+            await query.edit_message_text("✅ Love & Special mode ekhoni unlock aache! 😊")
+            return
         if deduct_points(context, PREMIUM_REPLY_COST):
             context.user_data["premium_reply_active"] = True
             await query.edit_message_text(
-                f"✅ Premium Reply unlocked! 💖\nPoints remaining: {get_user_points(context)}"
+                f"✅ Love & Special Mode unlock! 💖\n"
+                f"💰 Points remaining: {get_user_points(context)}"
             )
         else:
             await query.edit_message_text(
-                f"❌ Points kom! Tomar: {points} | Darkar: {PREMIUM_REPLY_COST}\n"
+                f"❌ Points kom!\n"
+                f"Tomar: {points} | Darkar: {PREMIUM_REPLY_COST}\n"
                 f"Streak diye points joma dao! 🔥"
             )
-    elif data == "buy_romantic":
+        return
+
+    if data == "buy_romantic":
+        if has_romantic_mode(context):
+            await query.edit_message_text("✅ Romantic mode ekhoni unlock aache! 😏")
+            return
         if deduct_points(context, ROMANTIC_MODE_COST):
             context.user_data["romantic_mode_active"] = True
             await query.edit_message_text(
-                f"✅ Romantic Mode unlocked! 😏💕\nPoints remaining: {get_user_points(context)}"
+                f"✅ Romantic Mode unlock! 😏💕\n"
+                f"💰 Points remaining: {get_user_points(context)}"
             )
         else:
             await query.edit_message_text(
-                f"❌ Points kom! Tomar: {points} | Darkar: {ROMANTIC_MODE_COST}\n"
+                f"❌ Points kom!\n"
+                f"Tomar: {points} | Darkar: {ROMANTIC_MODE_COST}\n"
                 f"Streak diye points joma dao! 🔥"
             )
+        return
+
+    if data in ("buy_monthly", "buy_yearly"):
+        months = 1 if data == "buy_monthly" else 12
+        price  = PRICE_MONTHLY if months == 1 else PRICE_YEARLY
+        label  = "Monthly (1 month)" if months == 1 else "Yearly (12 months)"
+        context.user_data["pending_payment"] = {"months": months, "price": price}
+        await query.edit_message_text(
+            f"💳 bKash Payment — {label}\n\n"
+            f"💵 Amount: {price} BDT\n"
+            f"📱 bKash Number: {BKASH_NUMBER}\n\n"
+            f"👉 Steps:\n"
+            f"1. Tomar bKash app kholo\n"
+            f"2. Send Money → {BKASH_NUMBER}\n"
+            f"3. Amount: {price} BDT\n"
+            f"4. Payment er pore Transaction ID ta ekhane pathao\n\n"
+            f"(e.g. 8N6XXXXXXX) — ekhane type kore pathao:"
+        )
+
+async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sub = is_subscribed(context)
+    if sub:
+        expiry = get_expiry_str(context)
+        expiry_text = f"\n📅 Expiry: {expiry}" if expiry else ""
+        inv = context.user_data.get("invite_count", 0)
+        await update.message.reply_text(
+            f"💎 Premium aktive! 🎉{expiry_text}\n\n"
+            f"Tomar sob kichhu unlock aache:\n"
+            f"✅ GF Mode  ✅ Love Mode\n"
+            f"✅ Special  ✅ Romantic\n"
+            f"✅ Voice Messages\n"
+            f"✅ Enhanced AI responses\n\n"
+            f"Invite ({inv} jon) diye aro reward: /invite\n"
+            f"Renew / extend: /premium",
+            reply_markup=build_mode_keyboard(context)
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"💳 Renew Monthly — {PRICE_MONTHLY} BDT", callback_data="buy_monthly")],
+            [InlineKeyboardButton(f"💳 Renew Yearly  — {PRICE_YEARLY} BDT", callback_data="buy_yearly")],
+        ])
+        await update.message.reply_text("Premium extend korte niche theke select koro:", reply_markup=keyboard)
+        return
+
+    inv = context.user_data.get("invite_count", 0)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"💳 Monthly — {PRICE_MONTHLY} BDT/month", callback_data="buy_monthly")],
+        [InlineKeyboardButton(f"💳 Yearly  — {PRICE_YEARLY} BDT/year ⭐ Best!", callback_data="buy_yearly")],
+    ])
+    await update.message.reply_text(
+        f"💎 Zoya Premium\n\n"
+        f"Premium = sob free reward er upore extra layer! 🚀\n\n"
+        f"Premium hole instantly unlock:\n"
+        f"  💕 GF Mode (no invite needed)\n"
+        f"  💘 Love & ✨ Special (no points needed)\n"
+        f"  😏 Romantic (no points needed)\n"
+        f"  🎧 Voice Messages (no invite needed)\n"
+        f"  🤖 Enhanced AI responses\n\n"
+        f"Invite & points system ekoi chole thakbe! 💡\n\n"
+        f"💵 Price:\n"
+        f"  Monthly: {PRICE_MONTHLY} BDT/month\n"
+        f"  Yearly:  {PRICE_YEARLY} BDT/year\n\n"
+        f"📱 Payment: bKash\n"
+        f"Niche theke plan select koro:",
+        reply_markup=keyboard
+    )
+
+def _grant_premium_dict(ud: dict, months: int = 1) -> datetime:
+    existing_str = ud.get("premium_expiry")
+    if existing_str:
+        try:
+            existing = datetime.fromisoformat(existing_str)
+            base = max(existing, datetime.now(BD_TZ))
+        except Exception:
+            base = datetime.now(BD_TZ)
+    else:
+        base = datetime.now(BD_TZ)
+    expiry = base + timedelta(days=30 * months)
+    ud["is_premium"]           = True
+    ud["premium_expiry"]       = expiry.isoformat()
+    ud["premium_reply_active"] = True
+    ud["romantic_mode_active"] = True
+    return expiry
+
+def _is_prem_dict(ud: dict, now: datetime) -> tuple:
+    expiry_str = ud.get("premium_expiry")
+    if expiry_str:
+        try:
+            expiry = datetime.fromisoformat(expiry_str)
+            if now < expiry:
+                return True, expiry.strftime("%d %b %y")
+        except Exception:
+            pass
+    if ud.get("is_premium") or ud.get("premium_reply_active"):
+        return True, "?"
+    return False, ""
+
+async def admin_addpremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_TELEGRAM_ID:
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "📋 Usage: /addpremium <user_id> [months]\n"
+            "Example:  /addpremium 123456789 1\n"
+            "Default months = 1 if not given."
+        )
+        return
+    try:
+        target_uid = int(args[0])
+        months     = int(args[1]) if len(args) > 1 else 1
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user_id or months number.")
+        return
+
+    ud     = context.application.user_data[target_uid]
+    expiry = _grant_premium_dict(ud, months)
+    await update.message.reply_text(
+        f"✅ Premium granted!\n"
+        f"👤 User ID: {target_uid}\n"
+        f"📅 Expiry:  {expiry.strftime('%d %b %Y')}\n"
+        f"⏳ Duration: {months} month(s)"
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=target_uid,
+            text=(
+                f"🎉 Tomar Zoya Premium aktive hye gese!\n\n"
+                f"📅 Valid until: {expiry.strftime('%d %b %Y')}\n\n"
+                f"Ekhon unlock hoeche:\n"
+                f"💕 GF Mode | 💘 Love Mode\n"
+                f"✨ Special | 😏 Romantic | 🎧 Voice\n\n"
+                f"Enjoy koro! 💖"
+            )
+        )
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Could not notify user: {e}")
+
+async def admin_removepremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_TELEGRAM_ID:
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /removepremium <user_id>")
+        return
+    try:
+        target_uid = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user_id.")
+        return
+
+    ud = context.application.user_data.get(target_uid)
+    if ud is None:
+        await update.message.reply_text(f"⚠️ User {target_uid} has no data yet (never messaged).")
+        return
+
+    ud["is_premium"]           = False
+    ud["premium_reply_active"] = False
+    ud["romantic_mode_active"] = False
+    ud.pop("premium_expiry", None)
+    await update.message.reply_text(f"✅ Premium removed from user {target_uid}.")
+    try:
+        await context.bot.send_message(
+            chat_id=target_uid,
+            text="ℹ️ Tomar Zoya Premium subscription remove hye gese. Renew korte /premium dao."
+        )
+    except Exception:
+        pass
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_TELEGRAM_ID:
+        return
+    all_users   = context.bot_data.get("all_users", {})
+    total       = len(all_users)
+    premium_cnt = 0
+    now         = datetime.now(BD_TZ)
+    for uid in all_users:
+        ud        = context.application.user_data.get(int(uid), {})
+        is_p, _   = _is_prem_dict(ud, now)
+        if is_p:
+            premium_cnt += 1
+    free_cnt = total - premium_cnt
+    await update.message.reply_text(
+        f"📊 Bot Statistics\n\n"
+        f"👥 Total users:   {total}\n"
+        f"💎 Premium users: {premium_cnt}\n"
+        f"🆓 Free users:    {free_cnt}\n\n"
+        f"📱 bKash: {BKASH_NUMBER}\n"
+        f"🔑 Admin ID: {ADMIN_TELEGRAM_ID}"
+    )
+
+async def admin_listusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_TELEGRAM_ID:
+        return
+    all_users = context.bot_data.get("all_users", {})
+    if not all_users:
+        await update.message.reply_text("No users yet.")
+        return
+    now   = datetime.now(BD_TZ)
+    lines = []
+    for uid, chat_id in list(all_users.items()):
+        ud       = context.application.user_data.get(int(uid), {})
+        is_p, ex = _is_prem_dict(ud, now)
+        badge    = "💎" if is_p else "👤"
+        exp_label = f" (until {ex})" if is_p and ex != "?" else (" (premium)" if is_p else "")
+        lines.append(f"{badge} {uid}{exp_label}")
+    text = "👥 All users:\n\n" + "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3990] + "\n..."
+    await update.message.reply_text(text)
 
 async def lang_bangla(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["lang"]        = "bangla"
@@ -784,35 +1145,100 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             inv      = context.user_data.get("invite_count", 0)
             mode_now = MODE_LABELS.get(get_user_mode(context), get_user_mode(context))
             lang_now = context.user_data.get("lang", "auto")
+            sub      = is_subscribed(context)
+            expiry   = get_expiry_str(context)
+            prem_txt = (f"💎 aktive (until {expiry})" if expiry else "💎 aktive") if sub else "🆓 free"
+            gf_txt   = "✅ unlock" if has_gf_access(context) else f"🔒 ({inv}/{INVITE_GF_THRESHOLD} inv)"
+            vc_txt   = "✅ unlock" if has_voice_unlocked(context) else f"🔒 ({inv}/{INVITE_VOICE_THRESHOLD} inv)"
+            vip_txt  = "👑 VIP" if has_vip_badge(context) else (f"{inv}/{INVITE_VIP_THRESHOLD} inv needed")
             await update.message.reply_text(
-                f"{'👑 ' if has_vip_badge(context) else ''}📊 Tomar Status\n\n"
-                f"🎭 Mode: {mode_now}\n🔥 Streak: {streak} days\n"
-                f"💰 Points: {points}\n👥 Invites: {inv}\n"
-                f"🌐 Language: {lang_now.capitalize()}\n\n"
-                f"Premium: {'✅' if has_premium_reply(context) else '🔒'} | "
-                f"Romantic: {'✅' if has_romantic_mode(context) else '🔒'}\n/shop",
+                f"📊 Tomar Status\n\n"
+                f"🎭 Mode:     {mode_now}\n"
+                f"🔥 Streak:  {streak} days\n"
+                f"💰 Points:  {points}\n"
+                f"👥 Invites: {inv} | {vip_txt}\n"
+                f"🌐 Lang:    {lang_now.capitalize()}\n\n"
+                f"💕 GF Mode: {gf_txt}\n"
+                f"🎧 Voice:   {vc_txt}\n"
+                f"💎 Premium: {prem_txt}\n\n"
+                f"/shop | /invite | /premium",
                 reply_markup=build_mode_keyboard(context)
             )
+            return
+
+        if user_text_stripped == "💎 Premium":
+            await premium_command(update, context)
             return
 
         if user_text_stripped == "🎁 Invite":
             bot_username = (await context.bot.get_me()).username
-            link = get_invite_link(bot_username, user_id)
-            inv  = context.user_data.get("invite_count", 0)
+            link  = get_invite_link(bot_username, user_id)
+            inv   = context.user_data.get("invite_count", 0)
+            gf_d  = "✅" if inv >= INVITE_GF_THRESHOLD    else f"({inv}/{INVITE_GF_THRESHOLD})"
+            vc_d  = "✅" if inv >= INVITE_VOICE_THRESHOLD  else f"({inv}/{INVITE_VOICE_THRESHOLD})"
+            vip_d = "✅" if inv >= INVITE_VIP_THRESHOLD    else f"({inv}/{INVITE_VIP_THRESHOLD})"
             await update.message.reply_text(
-                f"🎁 Invite link:\n{link}\n\nInvited: {inv}\n\n"
-                f"3 → 😏 Romantic\n5 → 🎧 Voice\n10 → 👑 VIP",
+                f"🎁 Invite link:\n{link}\n\n"
+                f"Invited: {inv} jon\n\n"
+                f"💕 {INVITE_GF_THRESHOLD} jon → GF Mode {gf_d}\n"
+                f"🎧 {INVITE_VOICE_THRESHOLD} jon → Voice {vc_d}\n"
+                f"👑 {INVITE_VIP_THRESHOLD} jon → VIP {vip_d}",
                 reply_markup=build_mode_keyboard(context)
             )
             return
 
-        if any(kw in user_text_lower for kw in VOICE_CHAT_TRIGGERS):
-            if not has_premium_reply(context) and not has_voice_unlocked(context):
-                need = INVITE_VOICE_THRESHOLD - context.user_data.get("invite_count", 0)
+        pending = context.user_data.get("pending_payment")
+        if pending and not is_subscribed(context):
+            txn_id = user_text_stripped
+            if len(txn_id) >= 6 and not txn_id.startswith("/"):
+                months         = pending.get("months", 1)
+                price          = pending.get("price", PRICE_MONTHLY)
+                plan           = "Monthly" if months == 1 else "Yearly"
+                uname          = update.message.from_user.username or ""
+                fname          = update.message.from_user.first_name or ""
+                user_name_disp = f"{fname} (@{uname})" if uname else f"{fname} (ID:{user_id})"
+                context.user_data["pending_payment"] = None
+
+                expiry = grant_premium(context, months)
+
                 await update.message.reply_text(
-                    f"🎧 Personal voice chat ekhon available na...\n\n"
-                    f"Unlock: 💰 /shop ({PREMIUM_REPLY_COST} pts) | 👥 {need} invite /invite\n\n"
-                    "Streak diye points joma dao! 🔓",
+                    f"🎉 Payment verify hoeche! Premium aktive!\n\n"
+                    f"📋 TxnID: {txn_id}\n"
+                    f"📦 Plan: {plan}\n"
+                    f"📅 Valid until: {expiry.strftime('%d %b %Y')}\n\n"
+                    f"Ekhon unlock:\n"
+                    f"💕 GF Mode | 💘 Love | ✨ Special\n"
+                    f"😏 Romantic | 🎧 Voice 💖",
+                    reply_markup=build_mode_keyboard(context)
+                )
+                if ADMIN_TELEGRAM_ID:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=ADMIN_TELEGRAM_ID,
+                            text=(
+                                f"💳 AUTO-APPROVED Payment\n\n"
+                                f"👤 User: {user_name_disp}\n"
+                                f"🆔 User ID: {user_id}\n"
+                                f"📦 Plan: {plan} ({price} BDT)\n"
+                                f"🧾 TxnID: {txn_id}\n"
+                                f"📅 Until: {expiry.strftime('%d %b %Y')}\n\n"
+                                f"⚠️ Verify bKash theke! Fake hole:\n"
+                                f"/removepremium {user_id}"
+                            )
+                        )
+                    except Exception as e:
+                        print(f"Admin notify error: {e}")
+                return
+
+        if any(kw in user_text_lower for kw in VOICE_CHAT_TRIGGERS):
+            if not has_voice_unlocked(context):
+                inv  = context.user_data.get("invite_count", 0)
+                need = INVITE_VOICE_THRESHOLD - inv
+                await update.message.reply_text(
+                    f"🎧 Voice messages unlock korte:\n\n"
+                    f"  👥 Aro {need} jon invite koro ({inv}/{INVITE_VOICE_THRESHOLD})\n"
+                    f"  💎 অথবা Premium nao: /premium\n\n"
+                    f"Invite link er jonno: /invite",
                     reply_markup=build_mode_keyboard(context)
                 )
                 return
@@ -1049,10 +1475,15 @@ def main():
         app.add_handler(CommandHandler("streak",   streak_command))
         app.add_handler(CommandHandler("invite",   invite_command))
         app.add_handler(CommandHandler("shop",     shop_command))
-        app.add_handler(CommandHandler("bangla",   lang_bangla))
-        app.add_handler(CommandHandler("banglish", lang_banglish))
-        app.add_handler(CommandHandler("english",  lang_english))
-        app.add_handler(CommandHandler("autolang", lang_auto))
+        app.add_handler(CommandHandler("bangla",        lang_bangla))
+        app.add_handler(CommandHandler("banglish",      lang_banglish))
+        app.add_handler(CommandHandler("english",       lang_english))
+        app.add_handler(CommandHandler("autolang",      lang_auto))
+        app.add_handler(CommandHandler("premium",       premium_command))
+        app.add_handler(CommandHandler("addpremium",    admin_addpremium))
+        app.add_handler(CommandHandler("removepremium", admin_removepremium))
+        app.add_handler(CommandHandler("stats",         admin_stats))
+        app.add_handler(CommandHandler("users",         admin_listusers))
 
         app.add_handler(CallbackQueryHandler(shop_callback, pattern="^buy_"))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
