@@ -1619,12 +1619,32 @@ def main():
             print("⚠️ job-queue missing — install: pip install 'python-telegram-bot[job-queue]'")
 
         print("💖 Zoya Bot running! (Tri-language: English | Bangla | Banglish)")
-        app.run_polling(
-            drop_pending_updates=True,
-            allowed_updates=["message", "callback_query"],
-            timeout=20,
-            poll_interval=0.5,
-        )
+
+        # Retry loop — if polling stops due to conflict, wait and restart
+        retry_delay = 30
+        while True:
+            try:
+                app.run_polling(
+                    drop_pending_updates=True,
+                    allowed_updates=["message", "callback_query"],
+                    timeout=20,
+                    poll_interval=0.5,
+                )
+                # run_polling returned cleanly (SIGTERM received) — exit loop
+                print("ℹ️ Polling stopped cleanly.")
+                break
+            except (KeyboardInterrupt, SystemExit):
+                print("🛑 Shutdown signal received.")
+                break
+            except Exception as e:
+                err = str(e).lower()
+                if "conflict" in err or "terminated by other getupdates" in err:
+                    print(f"⚠️ Conflict — waiting {retry_delay}s then restarting polling...")
+                    time.sleep(retry_delay)
+                    retry_delay = min(retry_delay + 15, 90)
+                else:
+                    print(f"❌ Polling error: {e} — restarting in {retry_delay}s...")
+                    time.sleep(retry_delay)
     finally:
         release_instance_lock()
         print("🔓 Instance lock released")
