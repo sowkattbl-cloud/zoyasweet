@@ -1488,19 +1488,10 @@ async def error_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     if "conflict" in err_str or "terminated by other getupdates" in err_str:
         _conflict_count += 1
-        print(f"⚠️  Conflict detected (#{_conflict_count}) — waiting for old instance to die...")
-        # Wait progressively longer before retrying — give the old instance time to exit
-        wait = min(15 * _conflict_count, 60)
-        await asyncio.sleep(wait)
-        # Only exit if conflict persists for a long time (10+ times)
-        if _conflict_count >= 10:
-            print("🛑 Too many persistent conflicts — exiting.")
-            release_instance_lock()
-            os._exit(0)
+        # Just log — don't sleep here, sleeping freezes the whole bot
+        print(f"⚠️  Conflict detected (#{_conflict_count}) — old instance still terminating...")
     elif "network" in err_str or "timed out" in err_str or "connection" in err_str:
-        # Temporary network issue — just log and continue
         print(f"⚠️  Network error (will retry): {context.error}")
-        await asyncio.sleep(3)
     else:
         _conflict_count = 0
         print(f"❌ Bot error: {context.error}")
